@@ -386,6 +386,9 @@ public class RenderChunk {
 
     public void deleteGlResources() {
         this.stopCompileTask();
+        if (net.theresa.render.vulkan.VulkanWorldBridge.isActive()) {
+            net.theresa.render.vulkan.VulkanWorldBridge.removeChunk(this);
+        }
 
         for (int i = 0; i < EnumWorldBlockLayer.values().length; ++i) {
             if (this.vertexBuffers[i] != null) {

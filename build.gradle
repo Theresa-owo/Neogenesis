@@ -39,6 +39,7 @@ dependencies {
     // lwjgl-vulkan ships no Windows natives: it binds the driver-provided vulkan-1.dll loader
 
     // ---- Latest stable toolchain / library stack ----
+    implementation 'org.joml:joml:1.10.9' // camera math for the Vulkan backend
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.4.10'
     implementation 'org.jetbrains.kotlin:kotlin-reflect:2.4.10'
     implementation 'com.google.guava:guava:33.7.1-jre'

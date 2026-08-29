@@ -212,7 +212,8 @@ public class ChunkRenderDispatcher {
             final RenderChunk chunkRenderer, final CompiledChunk compiledChunkIn) {
         if (Minecraft.getMinecraft().isCallingFromMinecraftThread()) {
             if (OpenGlHelper.useVbo()) {
-                this.uploadVertexBuffer(p_178503_2_, chunkRenderer.getVertexBufferByLayer(player.ordinal()));
+                this.uploadVertexBuffer(p_178503_2_, chunkRenderer.getVertexBufferByLayer(player.ordinal()),
+                        chunkRenderer, player);
             } else {
                 this.uploadDisplayList(p_178503_2_,
                         ((ListedRenderChunk) chunkRenderer).getDisplayList(player, compiledChunkIn), chunkRenderer);
@@ -238,9 +239,14 @@ public class ChunkRenderDispatcher {
         GL11.glEndList();
     }
 
-    private void uploadVertexBuffer(WorldRenderer p_178506_1_, VertexBuffer vertexBufferIn) {
+    private void uploadVertexBuffer(WorldRenderer p_178506_1_, VertexBuffer vertexBufferIn, RenderChunk chunkRenderer,
+            EnumWorldBlockLayer layer) {
         this.vertexUploader.setVertexBuffer(vertexBufferIn);
         this.vertexUploader.draw(p_178506_1_);
+        if (net.theresa.render.vulkan.VulkanWorldBridge.isActive()) {
+            net.theresa.render.vulkan.VulkanWorldBridge.uploadChunk(chunkRenderer, layer.ordinal(),
+                    p_178506_1_.getByteBuffer(), p_178506_1_.getVertexCount());
+        }
     }
 
     public void clearChunkUpdates() {

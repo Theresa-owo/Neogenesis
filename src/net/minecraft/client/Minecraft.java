@@ -405,6 +405,33 @@ public class Minecraft implements IThreadListener {
             return;
         }
 
+        // dev helper: -Dneogenesis.joinWorld=<save name|FIRST> skips the main menu,
+        // useful while the Vulkan backend has no GUI of its own
+        String autoJoin = System.getProperty("neogenesis.joinWorld");
+        if (autoJoin != null && !autoJoin.isEmpty()) {
+            try {
+                java.util.List<net.minecraft.world.storage.SaveFormatComparator> saves = this.saveLoader.getSaveList();
+                net.minecraft.world.storage.SaveFormatComparator target = null;
+                for (net.minecraft.world.storage.SaveFormatComparator save : saves) {
+                    if (save.getFileName().equalsIgnoreCase(autoJoin) || save.getDisplayName().equalsIgnoreCase(autoJoin)) {
+                        target = save;
+                        break;
+                    }
+                }
+                if (target == null && "FIRST".equalsIgnoreCase(autoJoin) && !saves.isEmpty()) {
+                    target = saves.get(0);
+                }
+                if (target != null) {
+                    logger.info("Auto-joining world: " + target.getFileName());
+                    this.launchIntegratedServer(target.getFileName(), target.getDisplayName(), (WorldSettings) null);
+                } else {
+                    logger.warn("Auto-join: no world matching " + autoJoin);
+                }
+            } catch (Exception autoJoinEx) {
+                logger.error("Auto-join failed", autoJoinEx);
+            }
+        }
+
         while (true) {
             try {
                 while (this.running) {
@@ -1963,6 +1990,9 @@ public class Minecraft implements IThreadListener {
      * unloads the current world first
      */
     public void loadWorld(WorldClient worldClientIn) {
+        if (net.theresa.render.vulkan.VulkanWorldBridge.isActive()) {
+            net.theresa.render.vulkan.VulkanWorldBridge.clearWorld();
+        }
         this.loadWorld(worldClientIn, "");
     }
 

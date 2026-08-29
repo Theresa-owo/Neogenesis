@@ -3097,6 +3097,14 @@ public class RenderGlobal implements IWorldAccess, IResourceManagerReloadListene
         }
     }
 
+    public java.util.List<RenderChunk> getVulkanVisibleChunks() {
+        java.util.List<RenderChunk> list = new java.util.ArrayList<>(this.renderInfos.size());
+        for (ContainerLocalRenderInformation info : this.renderInfos) {
+            list.add(info.renderChunk);
+        }
+        return list;
+    }
+
     public static class ContainerLocalRenderInformation {
 
         final RenderChunk renderChunk;
