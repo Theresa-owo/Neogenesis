@@ -1,0 +1,22 @@
+# Gradle
+build/
+.gradle/
+
+# IntelliJ IDEA (open build.gradle to import; IDEA regenerates these)
+.idea/
+*.iml
+out/
+
+# Local game runtime & user data (saves, logs, screenshots, launcher profile)
+.minecraft/
+logs/
+hs_err_pid*.log
+replay_pid*.log
+
+# Scratch / working files
+Temp/
+
+# Legacy jars superseded by Maven dependencies.
+# j-ogg stays: it is still a build dependency and has no Maven artifact.
+lib/*
+!lib/j-ogg-all-1.0.6.jar
