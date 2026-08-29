@@ -76,6 +76,17 @@ public class Display {
 	private static int latestHeight = 0;
 	private static boolean fullscreen = false;
 	private static final int[] lastWindowPos = {0, 0};
+	/** Vulkan companion mode: visible window is NO_API (Vulkan-presented); GL lives on a hidden helper window. */
+	private static boolean vulkanCompanion;
+	private static long glHelperWindow;
+
+	public static void setVulkanCompanion(boolean companion) {
+		vulkanCompanion = companion;
+	}
+
+	public static boolean isVulkanCompanion() {
+		return vulkanCompanion;
+	}
 
 	private static final GLFWVidMode GLFWvidmode = glfwGetVideoMode(glfwGetPrimaryMonitor());
 
@@ -131,6 +142,12 @@ public class Display {
 		if (!displayCreated) {
             GLFW.glfwGetPrimaryMonitor();
             GLFW.glfwDefaultWindowHints();
+			// Vulkan companion mode: the visible window is created with NO_API so a
+			// VkSurfaceKHR can be created on it; all GL usage goes to a hidden helper
+			// context below (GLFW forbids creating a Vulkan surface on a GL window).
+			if (vulkanCompanion) {
+				GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API);
+			}
 			GLFW.glfwWindowHint(131076, 0);
 			GLFW.glfwWindowHint(131075, displayResizable ? 1 : 0);
 			GLFW.glfwWindowHint(139271, 1);
@@ -268,9 +285,23 @@ public class Display {
 				GLFW.glfwSetWindowPos(Display.Window.handle, ((int) ((var3 - modeWidth()) / 2)), (int) ((var4 - modeHeight()) / 2));
 				displayX = (int) ((var3 - mode.getWidth()) / 2);
 				displayY = (int) ((var4 - mode.getHeight()) / 2);
-				GLFW.glfwMakeContextCurrent(Display.Window.handle);
-				GL.createCapabilities();
-				GLFW.glfwSwapInterval(1);
+				if (vulkanCompanion) {
+					// Hidden 1x1 helper window owns the GL context; the visible window
+					// is presented by Vulkan. GL calls from game code stay valid on it.
+					GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_OPENGL_API);
+					GLFW.glfwWindowHint(GLFW.GLFW_VISIBLE, GLFW.GLFW_FALSE);
+					glHelperWindow = GLFW.glfwCreateWindow(1, 1, "neogenesis-gl-helper", 0L, 0L);
+					if (glHelperWindow == 0L) {
+						throw new IllegalStateException("Failed to create GL helper window");
+					}
+					GLFW.glfwMakeContextCurrent(glHelperWindow);
+					GL.createCapabilities();
+					GLFW.glfwSwapInterval(0);
+				} else {
+					GLFW.glfwMakeContextCurrent(Display.Window.handle);
+					GL.createCapabilities();
+					GLFW.glfwSwapInterval(1);
+				}
 				GLFW.glfwShowWindow(Display.Window.handle);
 				displayCreated = true;
 			}
@@ -487,12 +518,21 @@ public class Display {
 	}
 
 	public static void swapBuffers() throws LWJGLException {
+		if (vulkanCompanion) {
+			// presenting is the Vulkan swapchain's job
+			return;
+		}
 		glfwSwapBuffers(Window.handle);
 	}
 
 	public static void destroy() {
 		Window.releaseCallbacks();
 		glfwDestroyWindow(Window.handle);
+		if (glHelperWindow != 0L) {
+			GLFW.glfwMakeContextCurrent(0L);
+			GLFW.glfwDestroyWindow(glHelperWindow);
+			glHelperWindow = 0L;
+		}
 
 		/*try {
 			glfwTerminate();

@@ -395,6 +395,8 @@ public class Minecraft implements IThreadListener {
 
         try {
             this.startGame();
+            net.theresa.render.RenderSystem.init(libsrc.lwjglx.opengl.Display.Window.handle,
+                    this.displayWidth, this.displayHeight);
         } catch (Throwable throwable) {
             CrashReport crashreport = CrashReport.makeCrashReport(throwable, "Initializing game");
             crashreport.makeCategory("Initialization");
@@ -600,6 +602,9 @@ public class Minecraft implements IThreadListener {
         Display.setResizable(true);
         // Display.setTitle("Minecraft 1.8.9");
         Display.setTitle(ClientMain.Companion.getVERSION().formatVersionString());
+        if ("vulkan".equalsIgnoreCase(System.getProperty("neogenesis.renderer", "opengl"))) {
+            libsrc.lwjglx.opengl.Display.setVulkanCompanion(true);
+        }
         try {
             Display.create((new PixelFormat()).withDepthBits(24));
         } catch (Exception lwjglexception) {
@@ -991,6 +996,7 @@ public class Minecraft implements IThreadListener {
 
             this.mcSoundHandler.unloadSounds();
         } finally {
+            net.theresa.render.RenderSystem.shutdown();
             Display.destroy();
 
             if (!this.hasCrashed) {
@@ -1058,24 +1064,28 @@ public class Minecraft implements IThreadListener {
         }
         */
 
-        this.checkGLError("Pre render");
         this.mcSoundHandler.setListener(this.thePlayer, this.timer.renderPartialTicks);
-        GlStateManager.pushMatrix();
-        GlStateManager.clear(16640);
-        GlStateManager.enableTexture2D();
-        if (/*ModManager.modtog.getSettingOn("enable_smoothmouse_fix") &&*/ this.thePlayer != null) {
-            this.thePlayer.prevRenderYawOffset = this.thePlayer.renderYawOffset;
-            this.thePlayer.prevRotationYawHead = this.thePlayer.rotationYawHead;
-            this.thePlayer.prevRotationYaw = this.thePlayer.rotationYaw;
-            this.thePlayer.prevRotationPitch = this.thePlayer.rotationPitch;
-        }
-        if (!this.skipRenderWorld) {
-            this.entityRenderer.updateCameraAndRender(this.timer.renderPartialTicks, var1);
-        }
+        if (net.theresa.render.RenderSystem.isVulkan()) {
+            net.theresa.render.RenderSystem.frame();
+        } else {
+            this.checkGLError("Pre render");
+            GlStateManager.pushMatrix();
+            GlStateManager.clear(16640);
+            GlStateManager.enableTexture2D();
+            if (/*ModManager.modtog.getSettingOn("enable_smoothmouse_fix") &&*/ this.thePlayer != null) {
+                this.thePlayer.prevRenderYawOffset = this.thePlayer.renderYawOffset;
+                this.thePlayer.prevRotationYawHead = this.thePlayer.rotationYawHead;
+                this.thePlayer.prevRotationYaw = this.thePlayer.rotationYaw;
+                this.thePlayer.prevRotationPitch = this.thePlayer.rotationPitch;
+            }
+            if (!this.skipRenderWorld) {
+                this.entityRenderer.updateCameraAndRender(this.timer.renderPartialTicks, var1);
+            }
 
-        GlStateManager.popMatrix();
-        GlStateManager.pushMatrix();
-        GlStateManager.popMatrix();
+            GlStateManager.popMatrix();
+            GlStateManager.pushMatrix();
+            GlStateManager.popMatrix();
+        }
         this.updateDisplay();
         Thread.yield();
         this.checkGLError("Post render");
@@ -1100,7 +1110,12 @@ public class Minecraft implements IThreadListener {
 
     public void updateDisplay() {
 
-        Display.update();
+        if (net.theresa.render.RenderSystem.isVulkan()) {
+            // Present happens through the Vulkan swapchain; only pump input/resize events here.
+            Display.processMessages();
+        } else {
+            Display.update();
+        }
 
         this.checkWindowResize();
     }

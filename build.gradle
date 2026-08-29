@@ -17,24 +17,26 @@ kotlin {
 }
 
 repositories {
-    // Aliyun mirror first: JVM TLS handshakes to repo.maven.apache.org get reset on this network.
-    maven { url = 'https://maven.aliyun.com/repository/public/' }
     mavenCentral() // https://repo.maven.apache.org/maven2/
     // Mojang-pinned artifacts (authlib, icu4j-core-mojang, paulscode sound libs)
     maven { url = 'https://libraries.minecraft.net/' }
 }
 
 dependencies {
-    // ---- LWJGL 3.4.3 (latest): GL/GLFW/OpenAL bindings + Windows natives ----
+    // ---- LWJGL 3.4.3 (latest): GL/GLFW/OpenAL/Vulkan bindings + Windows natives ----
     implementation platform('org.lwjgl:lwjgl-bom:3.4.3')
     implementation 'org.lwjgl:lwjgl'
     implementation 'org.lwjgl:lwjgl-glfw'
     implementation 'org.lwjgl:lwjgl-opengl'
     implementation 'org.lwjgl:lwjgl-openal'
+    implementation 'org.lwjgl:lwjgl-vulkan'
+    implementation 'org.lwjgl:lwjgl-shaderc'
     runtimeOnly 'org.lwjgl:lwjgl::natives-windows'
     runtimeOnly 'org.lwjgl:lwjgl-glfw::natives-windows'
     runtimeOnly 'org.lwjgl:lwjgl-opengl::natives-windows'
     runtimeOnly 'org.lwjgl:lwjgl-openal::natives-windows'
+    runtimeOnly 'org.lwjgl:lwjgl-shaderc::natives-windows'
+    // lwjgl-vulkan ships no Windows natives: it binds the driver-provided vulkan-1.dll loader
 
     // ---- Latest stable toolchain / library stack ----
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.4.10'
@@ -111,7 +113,8 @@ tasks.register('runClient', JavaExec) {
     mainClass = 'net.minecraft.client.main.Main'
     classpath = sourceSets.main.runtimeClasspath
     workingDir = rootDir
-    jvmArgs '-Xmx2G', '-Dfile.encoding=UTF-8'
+    jvmArgs '-Xmx2G', '-Dfile.encoding=UTF-8',
+            "-Dneogenesis.renderer=${providers.gradleProperty('renderer').orElse('opengl')}"
     args '--accessToken', '0',
          '--username', 'Theresa',
          '--version', 'Neogenesis',
