@@ -49,21 +49,29 @@ public class VulkanTexture {
     public int height;
     public int levels;
     private final int pixelFormat;
+    private final boolean nearest;
 
     /** Owns the short-lived command buffers used by (re)uploads. */
     private long uploadPool = NULL;
 
     public VulkanTexture(VulkanContext ctx, int glTextureId, int width, int height, int levels) {
-        this(ctx, glTextureId, width, height, levels, VK_FORMAT_R8G8B8A8_SRGB);
+        this(ctx, glTextureId, width, height, levels, VK_FORMAT_R8G8B8A8_SRGB, false);
     }
 
     /** format overload: pass VK_FORMAT_R8G8B8A8_UNORM to sample data without sRGB conversion. */
     public VulkanTexture(VulkanContext ctx, int glTextureId, int width, int height, int levels, int format) {
+        this(ctx, glTextureId, width, height, levels, format, false);
+    }
+
+    /** nearestFiltering=true reproduces the vanilla crisp pixel look (block atlas). */
+    public VulkanTexture(VulkanContext ctx, int glTextureId, int width, int height, int levels, int format,
+            boolean nearestFiltering) {
         this.ctx = ctx;
         this.width = width;
         this.height = height;
         this.levels = Math.max(1, levels);
         this.pixelFormat = format;
+        this.nearest = nearestFiltering;
         activeContext = ctx;
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -327,8 +335,8 @@ public class VulkanTexture {
     private void createSampler(MemoryStack stack) {
         VkSamplerCreateInfo info = VkSamplerCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
-                .magFilter(VK_FILTER_LINEAR)
-                .minFilter(VK_FILTER_LINEAR)
+                .magFilter(nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR)
+                .minFilter(nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR)
                 .mipmapMode(VK_SAMPLER_MIPMAP_MODE_LINEAR)
                 .addressModeU(VK_SAMPLER_ADDRESS_MODE_REPEAT)
                 .addressModeV(VK_SAMPLER_ADDRESS_MODE_REPEAT)

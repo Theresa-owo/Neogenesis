@@ -151,7 +151,7 @@ public class VulkanRenderer {
             mc0.entityRenderer.updateLightmap(0.0f);
             lightmapTexture = new VulkanTexture(context,
                     mc0.entityRenderer.getLightmapTexture().getGlTextureId(), 16, 16, 1,
-                    VK10.VK_FORMAT_R8G8B8A8_UNORM);
+                    VK10.VK_FORMAT_R8G8B8A8_UNORM, false);
         }
         createDescriptorResources();
         createTerrainPipelines();
@@ -440,7 +440,7 @@ public class VulkanRenderer {
         int[] dims = queryGlTextureSize(glId);
         int mips = Math.max(1, mc.gameSettings.mipmapLevels + 1);
         atlasTexture = new VulkanTexture(context, glId, dims[0], dims[1], mips,
-                VK10.VK_FORMAT_R8G8B8A8_UNORM);
+                VK10.VK_FORMAT_R8G8B8A8_UNORM, true);
     }
 
     private int getLightmapGlId() {
@@ -687,8 +687,9 @@ public class VulkanRenderer {
             VkPipelineRasterizationStateCreateInfo rasterization = VkPipelineRasterizationStateCreateInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO)
                     .polygonMode(VK10.VK_POLYGON_MODE_FILL)
+                    // culling stays off: MC terrain quads are not consistently wound,
+                    // and vanilla renders them with culling disabled as well
                     .cullMode(VK10.VK_CULL_MODE_NONE)
-                    .frontFace(VK10.VK_FRONT_FACE_COUNTER_CLOCKWISE)
                     .lineWidth(1.0f);
 
             VkPipelineMultisampleStateCreateInfo multisample = VkPipelineMultisampleStateCreateInfo.calloc(stack)
