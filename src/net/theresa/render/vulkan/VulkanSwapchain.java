@@ -209,11 +209,13 @@ public class VulkanSwapchain {
      * the swapchain is out of date and {@link #recreate()} is needed.
      * VK_SUBOPTIMAL_KHR still returns a usable index.
      */
-    public int acquire(long imageAvailableSemaphore, long fence) {
+    public int acquire(long imageAvailableSemaphore) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             IntBuffer pImageIndex = stack.mallocInt(1);
+            // semaphore only: associating a fence here too would make it illegal to
+            // reuse that fence for the frame's vkQueueSubmit (VUID-vkQueueSubmit-fence-00064)
             int result = vkAcquireNextImageKHR(ctx.device, swapchain, ACQUIRE_TIMEOUT,
-                    imageAvailableSemaphore, fence, pImageIndex);
+                    imageAvailableSemaphore, NULL, pImageIndex);
             if (result == VK_ERROR_OUT_OF_DATE_KHR) {
                 return -1;
             }

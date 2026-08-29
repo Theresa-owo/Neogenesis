@@ -32,8 +32,18 @@ public final class VulkanWorldBridge {
      * Mirrors a chunk layer upload. layerOrdinal follows
      * EnumWorldBlockLayer.ordinal(): 0 SOLID, 1 CUTOUT_MIPPED, 2 CUTOUT, 3 TRANSLUCENT.
      */
+    public static int uploadsSeen;
+    public static int hookCalls;
+    public static int nullStoreCalls;
+
     public static void uploadChunk(RenderChunk chunk, int layerOrdinal, ByteBuffer data, int vertexCount) {
-        if (store != null && data != null && vertexCount > 0) {
+        hookCalls++;
+        if (store == null) {
+            nullStoreCalls++;
+            return;
+        }
+        if (data != null && vertexCount > 0) {
+            uploadsSeen++;
             store.upload(chunk, layerOrdinal, data, vertexCount);
         }
     }

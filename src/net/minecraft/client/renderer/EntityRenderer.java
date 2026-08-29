@@ -946,7 +946,7 @@ public class EntityRenderer implements IResourceManagerReloadListener {
         this.lightmapUpdateNeeded = true;
     }
 
-    private void updateLightmap(float partialTicks) {
+    public void updateLightmap(float partialTicks) {
         if (this.lightmapUpdateNeeded) {
 
             World world = this.mc.theWorld;
@@ -1082,28 +1082,12 @@ public class EntityRenderer implements IResourceManagerReloadListener {
         return i > 200 ? 1.0F : 0.7F + MathHelper.sin((i - partialTicks) * (float) Math.PI * 0.2F) * 0.3F;
     }
 
-    public void updateCameraAndRender(float partialTicks, long nanoTime) {
-
-        Config.renderPartialTicks = partialTicks;
-        this.frameInit();
-        boolean flag = Display.isActive();
-
-        if (!flag && this.mc.gameSettings.pauseOnLostFocus
-                && (!this.mc.gameSettings.touchscreen || !Mouse.isButtonDown(1))) {
-            if (Minecraft.getSystemTime() - this.prevFrameTime > 500L) {
-                this.mc.displayInGameMenu();
-            }
-        } else {
-            this.prevFrameTime = Minecraft.getSystemTime();
-        }
-
-        if (flag && Minecraft.isRunningOnMac && this.mc.inGameHasFocus) { // && !Mouse.isInsideWindow()
-            Mouse.setGrabbed(false);
-            Mouse.setCursorPosition(Display.getWidth() / 2, Display.getHeight() / 2);
-            Mouse.setGrabbed(true);
-        }
-
-        if (FreeLookUtil.Instance.overrideMouse() && flag) {
+    /**
+     * Mouse-look portion of updateCameraAndRender, extracted so the Vulkan frame
+     * loop can drive player view rotation while it owns the render path.
+     */
+    public void updateMouseLook(float partialTicks, boolean windowFocused) {
+        if (FreeLookUtil.Instance.overrideMouse() && windowFocused) {
             this.mc.mouseHelper.mouseXYChange();
             float f = this.mc.gameSettings.mouseSensitivity * 0.6F + 0.2F;
             float f1 = f * f * f * 8.0F;
@@ -1128,6 +1112,34 @@ public class EntityRenderer implements IResourceManagerReloadListener {
             }
             this.mc.thePlayer.setAngles(f2, f3 * i);
         }
+    }
+
+    public DynamicTexture getLightmapTexture() {
+        return this.lightmapTexture;
+    }
+
+    public void updateCameraAndRender(float partialTicks, long nanoTime) {
+
+        Config.renderPartialTicks = partialTicks;
+        this.frameInit();
+        boolean flag = Display.isActive();
+
+        if (!flag && this.mc.gameSettings.pauseOnLostFocus
+                && (!this.mc.gameSettings.touchscreen || !Mouse.isButtonDown(1))) {
+            if (Minecraft.getSystemTime() - this.prevFrameTime > 500L) {
+                this.mc.displayInGameMenu();
+            }
+        } else {
+            this.prevFrameTime = Minecraft.getSystemTime();
+        }
+
+        if (flag && Minecraft.isRunningOnMac && this.mc.inGameHasFocus) { // && !Mouse.isInsideWindow()
+            Mouse.setGrabbed(false);
+            Mouse.setCursorPosition(Display.getWidth() / 2, Display.getHeight() / 2);
+            Mouse.setGrabbed(true);
+        }
+
+        this.updateMouseLook(partialTicks, flag);
 
         if (!this.mc.skipRenderWorld) {
             anaglyphEnable = this.mc.gameSettings.anaglyph;

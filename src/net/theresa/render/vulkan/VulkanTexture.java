@@ -48,15 +48,22 @@ public class VulkanTexture {
     public int width;
     public int height;
     public int levels;
+    private final int pixelFormat;
 
     /** Owns the short-lived command buffers used by (re)uploads. */
     private long uploadPool = NULL;
 
     public VulkanTexture(VulkanContext ctx, int glTextureId, int width, int height, int levels) {
+        this(ctx, glTextureId, width, height, levels, VK_FORMAT_R8G8B8A8_SRGB);
+    }
+
+    /** format overload: pass VK_FORMAT_R8G8B8A8_UNORM to sample data without sRGB conversion. */
+    public VulkanTexture(VulkanContext ctx, int glTextureId, int width, int height, int levels, int format) {
         this.ctx = ctx;
         this.width = width;
         this.height = height;
         this.levels = Math.max(1, levels);
+        this.pixelFormat = format;
         activeContext = ctx;
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -272,7 +279,7 @@ public class VulkanTexture {
         VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
                 .imageType(VK_IMAGE_TYPE_2D)
-                .format(VK_FORMAT_R8G8B8A8_SRGB)
+                .format(pixelFormat)
                 .extent(it -> it.set(width, height, 1))
                 .mipLevels(levels)
                 .arrayLayers(1)
@@ -305,7 +312,7 @@ public class VulkanTexture {
                 .sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
                 .image(image)
                 .viewType(VK_IMAGE_VIEW_TYPE_2D)
-                .format(VK_FORMAT_R8G8B8A8_SRGB)
+                .format(pixelFormat)
                 .subresourceRange(VkImageSubresourceRange.calloc(stack)
                         .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
                         .baseMipLevel(0)

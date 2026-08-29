@@ -208,9 +208,14 @@ public class ChunkRenderDispatcher {
         return flag1;
     }
 
+    public static int uploadAttempts;
+    public static int uploadOnMainThread;
+
     public ListenableFuture<Object> uploadChunk(final EnumWorldBlockLayer player, final WorldRenderer p_178503_2_,
             final RenderChunk chunkRenderer, final CompiledChunk compiledChunkIn) {
+        uploadAttempts++;
         if (Minecraft.getMinecraft().isCallingFromMinecraftThread()) {
+            uploadOnMainThread++;
             if (OpenGlHelper.useVbo()) {
                 this.uploadVertexBuffer(p_178503_2_, chunkRenderer.getVertexBufferByLayer(player.ordinal()),
                         chunkRenderer, player);
@@ -241,11 +246,24 @@ public class ChunkRenderDispatcher {
 
     private void uploadVertexBuffer(WorldRenderer p_178506_1_, VertexBuffer vertexBufferIn, RenderChunk chunkRenderer,
             EnumWorldBlockLayer layer) {
+        // Capture the mesh BEFORE VertexBufferUploader.draw() resets the WorldRenderer.
+        // Vulkan has no GL_QUADS topology, so expand quads to triangles for the store;
+        // getByteBuffer()/getVertexCount() then reflect the triangle buffer.
+        java.nio.ByteBuffer vulkanData = null;
+        int vulkanCount = 0;
+        if (net.theresa.render.vulkan.VulkanWorldBridge.isActive()) {
+            if (p_178506_1_.getDrawMode() == 7) {
+                p_178506_1_.quadsToTriangles();
+            }
+            vulkanCount = p_178506_1_.getVertexCount();
+            java.nio.ByteBuffer source = p_178506_1_.getByteBuffer();
+            vulkanData = source.slice();
+        }
         this.vertexUploader.setVertexBuffer(vertexBufferIn);
         this.vertexUploader.draw(p_178506_1_);
-        if (net.theresa.render.vulkan.VulkanWorldBridge.isActive()) {
+        if (vulkanData != null && vulkanCount > 0) {
             net.theresa.render.vulkan.VulkanWorldBridge.uploadChunk(chunkRenderer, layer.ordinal(),
-                    p_178506_1_.getByteBuffer(), p_178506_1_.getVertexCount());
+                    vulkanData, vulkanCount);
         }
     }
 
