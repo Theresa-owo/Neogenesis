@@ -137,6 +137,16 @@ public class VulkanTexture {
                     GL11.glGetTexImage(GL11.GL_TEXTURE_2D, level, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, slice);
                     offset += bytes;
                 }
+                if (Boolean.getBoolean("neogenesis.vkMipProbe")) {
+                    for (int level = 0; level < levels; level++) {
+                        long off = 0;
+                        for (int l = 0; l < level; l++) off += (long) dims[l*2] * dims[l*2+1] * 4;
+                        long cnt = (long) dims[level*2] * dims[level*2+1] * 4;
+                        long sum = 0;
+                        for (long b = 0; b < Math.min(cnt, 4096); b++) sum += mapped.get((int)(off + b)) & 0xFF;
+                        System.out.printf("[MipProbe] level=%d off=%d mean(first4KB)=%.2f%n", level, off, (double) sum / Math.min(cnt, 4096));
+                    }
+                }
                 vkUnmapMemory(ctx.device, staging[1]);
 
                 recordAndSubmit(stack, staging[0], dims, initial);
