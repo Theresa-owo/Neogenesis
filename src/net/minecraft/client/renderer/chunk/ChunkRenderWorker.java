@@ -104,6 +104,14 @@ public class ChunkRenderWorker implements Runnable {
             final CompiledChunk lvt_7_1_ = generator.getCompiledChunk();
             ArrayList lvt_8_1_ = Lists.newArrayList();
 
+            if (net.theresa.render.vulkan.VulkanWorldBridge.isActive()) {
+                boolean[] layerStarted = new boolean[EnumWorldBlockLayer.values().length];
+                for (EnumWorldBlockLayer enumworldblocklayer : EnumWorldBlockLayer.values()) {
+                    layerStarted[enumworldblocklayer.ordinal()] = lvt_7_1_.isLayerStarted(enumworldblocklayer);
+                }
+                net.theresa.render.vulkan.VulkanWorldBridge.markLayerStates(generator.getRenderChunk(), layerStarted);
+            }
+
             if (chunkcompiletaskgenerator$type == ChunkCompileTaskGenerator.Type.REBUILD_CHUNK) {
                 for (EnumWorldBlockLayer enumworldblocklayer : EnumWorldBlockLayer.values()) {
                     if (lvt_7_1_.isLayerStarted(enumworldblocklayer)) {

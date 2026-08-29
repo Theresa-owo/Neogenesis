@@ -233,6 +233,38 @@ public class VulkanChunkStore {
     }
 
     /** Removes and destroys every layer buffer of {@code chunk}. */
+    /**
+     * Drops stored meshes for layers reported empty by the latest compile.
+     * Called from the worker path so ghost meshes cannot outlive their data.
+     */
+    public void markLayerStates(Object chunk, boolean[] layerStarted) {
+        if (ctx.device == null) {
+            return;
+        }
+        LayerData[] layers = chunks.get(chunk);
+        if (layers == null) {
+            return;
+        }
+        for (int layer = 0; layer < layers.length && layer < layerStarted.length; layer++) {
+            if (!layerStarted[layer] && layers[layer] != null) {
+                retired.add(new Retired(layers[layer].buffer, layers[layer].memory, retireClock));
+                layers[layer] = null;
+                if (isEmptyLayers(layers)) {
+                    chunks.remove(chunk);
+                }
+            }
+        }
+    }
+
+    private static boolean isEmptyLayers(LayerData[] layers) {
+        for (LayerData data : layers) {
+            if (data != null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public void remove(Object chunk) {
         if (ctx.device == null) {
             return;
@@ -261,6 +293,10 @@ public class VulkanChunkStore {
             }
         }
         chunks.clear();
+    }
+
+    public int size() {
+        return chunks.size();
     }
 
     /** Buffer handle for (chunk, layer) or 0 when not present. */

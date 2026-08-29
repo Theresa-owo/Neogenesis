@@ -108,6 +108,7 @@ public class VulkanRenderer {
     private long[] imageRenderFinished = new long[0];
     private boolean reloadQueued;
     private boolean prevF9Down;
+    private int staleDraws;
 
     private VulkanChunkStore chunkStore;
     private int frameCount;
@@ -118,6 +119,9 @@ public class VulkanRenderer {
     private float eyeX;
     private float eyeY;
     private float eyeZ;
+    private double eyeXd;
+    private double eyeYd;
+    private double eyeZd;
 
     private long window;
     private int framebufferWidth = -1;
@@ -203,9 +207,14 @@ public class VulkanRenderer {
         boolean noFog = Boolean.getBoolean("neogenesis.vkNoFog");
         fogStart = noFog ? 9_000.0f : farPlane * 0.7f;
         fogEnd = noFog ? 10_000.0f : farPlane * 1.0f;
-        eyeX = (float) eye.xCoord;
-        eyeY = (float) eye.yCoord;
-        eyeZ = (float) eye.zCoord;
+        // double precision on the CPU: chunk origins are subtracted from the eye
+        // BEFORE going to the GPU, avoiding float32 cancellation at far coordinates
+        eyeXd = eye.xCoord;
+        eyeYd = eye.yCoord;
+        eyeZd = eye.zCoord;
+        eyeX = (float) eyeXd;
+        eyeY = (float) eyeYd;
+        eyeZ = (float) eyeZd;
 
         VulkanFrame frame = frames[currentFrame];
         // block until this slot's previous frame finished; every resource of the
@@ -220,11 +229,15 @@ public class VulkanRenderer {
         }
 
         if (frameCount % 120 == 0) {
+            if (frameCount > 0) {
+                System.out.printf("[VulkanStaleWindow] staleDraws in last window = %d%n", staleDraws);
+            }
+            staleDraws = 0;
             List<RenderChunk> vis = Minecraft.getMinecraft().renderGlobal.getVulkanVisibleChunks();
             System.out.println(String.format(
-                    "[VulkanDiag] frame=%d visible=%d hooks=%d uploads=%d eye=%.1f,%.1f,%.1f fogStart=%.0f fogEnd=%.0f",
+                    "[VulkanDiag] frame=%d visible=%d hooks=%d uploads=%d staleDraws=%d store=%d eye=%.1f,%.1f,%.1f",
                     frameCount, vis.size(), VulkanWorldBridge.hookCalls, VulkanWorldBridge.uploadsSeen,
-                    eyeX, eyeY, eyeZ, fogStart, fogEnd));
+                    staleDraws, chunkStore.size(), eyeX, eyeY, eyeZ));
         }
 
         if (reloadQueued) {
@@ -372,6 +385,11 @@ public class VulkanRenderer {
                 int count = chunkStore.getVertexCount(chunk, layer);
                 if (count <= 0) {
                     continue;
+                }
+
+                if (layer == LAYER_SOLID && !net.theresa.render.vulkan.VulkanWorldBridge
+                        .hasFreshMesh(chunk)) {
+                    staleDraws++;
                 }
 
                 long wanted = layer == LAYER_TRANSLUCENT ? terrainTranslucentPipeline : terrainOpaquePipeline;
@@ -583,12 +601,12 @@ public class VulkanRenderer {
                     + "layout(location = 2) out vec2 vLM;\n"
                     + "layout(location = 3) out float vDist;\n"
                     + "void main() {\n"
-                    + "    vec3 worldPos = push.chunkOrigin.xyz + inPos;\n"
-                    + "    gl_Position = push.mvp * vec4(worldPos, 1.0);\n"
+                    + "    vec3 viewPos = push.chunkOrigin.xyz + inPos;\n"
+                    + "    gl_Position = push.mvp * vec4(viewPos, 1.0);\n"
                     + "    vColor = inColor.rgb;\n"
                     + "    vUV = inUV;\n"
                     + "    vLM = inLM;\n"
-                    + "    vDist = length(worldPos - push.eye.xyz);\n"
+                    + "    vDist = length(viewPos);\n"
                     + "}\n";
             fragmentGlsl = "#version 450\n"
                     + "layout(push_constant) uniform Push { mat4 mvp; vec4 chunkOrigin; vec4 eye; vec4 fog; } push;\n"
