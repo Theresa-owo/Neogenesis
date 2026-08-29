@@ -112,7 +112,10 @@ public class VulkanSwapchain {
         int format = formats.get(0).format();
         for (int i = 0; i < formatCount; i++) {
             VkSurfaceFormatKHR candidate = formats.get(i);
-            if (candidate.format() == VK_FORMAT_B8G8R8A8_SRGB
+            // UNORM, not SRGB: our shaders already work in sRGB-encoded values like the
+            // GL fixed-function path did; an SRGB attachment would re-encode them
+            // (double gamma -> washed, oversaturated pastel output)
+            if (candidate.format() == VK_FORMAT_B8G8R8A8_UNORM
                     && candidate.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
                 return candidate.format();
             }

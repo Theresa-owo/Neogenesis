@@ -96,6 +96,7 @@ public class VulkanRenderer {
 
     private VulkanTexture atlasTexture;
     private VulkanTexture lightmapTexture;
+    private final boolean lightmapEnabled = Boolean.getBoolean("neogenesis.vkLightmap");
     private long descriptorSetLayout;
     private long descriptorPool;
     private long descriptorSet;
@@ -143,11 +144,13 @@ public class VulkanRenderer {
         VulkanWorldBridge.attach(chunkStore);
 
         initWorldTextures();
-        Minecraft mc0 = Minecraft.getMinecraft();
-        mc0.entityRenderer.updateLightmap(0.0f);
-        lightmapTexture = new VulkanTexture(context,
-                mc0.entityRenderer.getLightmapTexture().getGlTextureId(), 16, 16, 1,
-                VK10.VK_FORMAT_R8G8B8A8_UNORM);
+        if (lightmapEnabled) {
+            Minecraft mc0 = Minecraft.getMinecraft();
+            mc0.entityRenderer.updateLightmap(0.0f);
+            lightmapTexture = new VulkanTexture(context,
+                    mc0.entityRenderer.getLightmapTexture().getGlTextureId(), 16, 16, 1,
+                    VK10.VK_FORMAT_R8G8B8A8_UNORM);
+        }
         createDescriptorResources();
         createTerrainPipelines();
     }
@@ -174,9 +177,11 @@ public class VulkanRenderer {
         float partialTicks = mc.timer.renderPartialTicks;
         mc.entityRenderer.updateMouseLook(partialTicks,
                 org.lwjgl.glfw.GLFW.glfwGetWindowAttrib(window, org.lwjgl.glfw.GLFW.GLFW_FOCUSED) != 0);
-        mc.entityRenderer.updateLightmap(partialTicks);
-        if (lightmapTexture != null) {
-            lightmapTexture.updateFromGL(getLightmapGlId());
+        if (lightmapEnabled) {
+            mc.entityRenderer.updateLightmap(partialTicks);
+            if (lightmapTexture != null) {
+                lightmapTexture.updateFromGL(getLightmapGlId());
+            }
         }
         mc.entityRenderer.setupCameraTransform(partialTicks, 2);
         Frustum frustum = new Frustum(ClippingHelperImpl.getInstance());
@@ -187,8 +192,9 @@ public class VulkanRenderer {
 
         Matrix4f mvp = computeCameraMatrix(mc, view, partialTicks, eye);
         float farPlane = mc.gameSettings.renderDistanceChunks * 16.0f;
-        fogStart = farPlane * 0.55f;
-        fogEnd = farPlane * 0.95f;
+        boolean noFog = Boolean.getBoolean("neogenesis.vkNoFog");
+        fogStart = noFog ? 9_000.0f : farPlane * 0.7f;
+        fogEnd = noFog ? 10_000.0f : farPlane * 1.0f;
         eyeX = (float) eye.xCoord;
         eyeY = (float) eye.yCoord;
         eyeZ = (float) eye.zCoord;
@@ -207,13 +213,10 @@ public class VulkanRenderer {
 
         if (frameCount % 120 == 0) {
             List<RenderChunk> vis = Minecraft.getMinecraft().renderGlobal.getVulkanVisibleChunks();
-            System.out.println("[VulkanDiag] frame=" + frameCount + " visible=" + vis.size()
-                    + " hooks=" + VulkanWorldBridge.hookCalls + " nullStore=" + VulkanWorldBridge.nullStoreCalls
-                    + " uploads=" + VulkanWorldBridge.uploadsSeen
-                    + " attempts=" + ChunkRenderDispatcher.uploadAttempts
-                    + " onMain=" + ChunkRenderDispatcher.uploadOnMainThread
-                    + " useVbo=" + OpenGlHelper.useVbo() + " fastRender=" + Config.isFastRender()
-                    + " cam=" + String.format("%.1f,%.1f,%.1f", eye.xCoord, eye.yCoord, eye.zCoord));
+            System.out.println(String.format(
+                    "[VulkanDiag] frame=%d visible=%d hooks=%d uploads=%d eye=%.1f,%.1f,%.1f fogStart=%.0f fogEnd=%.0f",
+                    frameCount, vis.size(), VulkanWorldBridge.hookCalls, VulkanWorldBridge.uploadsSeen,
+                    eyeX, eyeY, eyeZ, fogStart, fogEnd));
         }
 
         recordWorldFrame(frame.commandBuffer, imageIndex, mvp);
@@ -314,7 +317,8 @@ public class VulkanRenderer {
             VK10.vkCmdSetScissor(commandBuffer, 0, scissor);
 
             String bisect = System.getProperty("neogenesis.vkBisect", "");
-            if ((atlasTexture != null && descriptorSet != 0L) && !bisect.contains("nodesc")) {
+            if ((atlasTexture != null && (!lightmapEnabled || lightmapTexture != null) && descriptorSet != 0L)
+                    && !bisect.contains("nodesc")) {
                 VK10.vkCmdBindDescriptorSets(commandBuffer, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, terrainLayout, 0,
                         stack.longs(descriptorSet), null);
             }
@@ -338,7 +342,7 @@ public class VulkanRenderer {
         String mode = System.getProperty("neogenesis.vkBisect", "");
         LongBuffer bindBuffer = stack.mallocLong(1);
         LongBuffer bindOffset = stack.longs(0L);
-        ByteBuffer push = stack.malloc(PUSH_BLOCK_SIZE);
+        ByteBuffer push = stack.malloc(lightmapEnabled ? PUSH_BLOCK_SIZE : 80);
 
         long boundPipeline = 0;
         for (RenderChunk chunk : visible) {
@@ -367,10 +371,12 @@ public class VulkanRenderer {
                 mvp.get(push);
                 push.position(64);
                 push.putFloat((float) baseX).putFloat((float) baseY).putFloat((float) baseZ).putFloat(1.0f);
-                push.position(80);
-                push.putFloat(eyeX).putFloat(eyeY).putFloat(eyeZ).putFloat(fogStart);
-                push.position(96);
-                push.putFloat(fogEnd).putFloat(0.47f).putFloat(0.65f).putFloat(1.0f);
+                if (lightmapEnabled) {
+                    push.position(80);
+                    push.putFloat(eyeX).putFloat(eyeY).putFloat(eyeZ).putFloat(fogStart);
+                    push.position(96);
+                    push.putFloat(fogEnd).putFloat(0.47f).putFloat(0.65f).putFloat(1.0f);
+                }
                 push.flip();
 
                 bindBuffer.put(0, buffer);
@@ -378,7 +384,11 @@ public class VulkanRenderer {
                 if (mode.contains("nopush")) {
                     continue;
                 }
-                VK10.vkCmdPushConstants(commandBuffer, terrainLayout, VK10.VK_SHADER_STAGE_VERTEX_BIT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, push);
+                VK10.vkCmdPushConstants(commandBuffer, terrainLayout,
+                        lightmapEnabled
+                                ? (VK10.VK_SHADER_STAGE_VERTEX_BIT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT)
+                                : VK10.VK_SHADER_STAGE_VERTEX_BIT,
+                        0, push);
                 if (mode.contains("binds")) {
                     continue;
                 }
@@ -438,15 +448,18 @@ public class VulkanRenderer {
 
     private void createDescriptorResources() {
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer binding = VkDescriptorSetLayoutBinding.calloc(2, stack);
+            int samplerCount = lightmapEnabled ? 2 : 1;
+            VkDescriptorSetLayoutBinding.Buffer binding = VkDescriptorSetLayoutBinding.calloc(samplerCount, stack);
             binding.get(0).binding(0)
                     .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                     .descriptorCount(1)
                     .stageFlags(VK10.VK_SHADER_STAGE_FRAGMENT_BIT);
-            binding.get(1).binding(1)
-                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                    .descriptorCount(1)
-                    .stageFlags(VK10.VK_SHADER_STAGE_FRAGMENT_BIT);
+            if (lightmapEnabled) {
+                binding.get(1).binding(1)
+                        .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .descriptorCount(1)
+                        .stageFlags(VK10.VK_SHADER_STAGE_FRAGMENT_BIT);
+            }
             org.lwjgl.vulkan.VkDescriptorSetLayoutCreateInfo layoutInfo =
                     org.lwjgl.vulkan.VkDescriptorSetLayoutCreateInfo.calloc(stack)
                             .sType(VK10.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO)
@@ -460,7 +473,7 @@ public class VulkanRenderer {
                     .sType(VK10.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO)
                     .maxSets(1);
             poolInfo.pPoolSizes(VkDescriptorPoolSize.calloc(1, stack)
-                    .type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(2));
+                    .type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(samplerCount));
             long[] pool = new long[1];
             VulkanContext.check(VK10.vkCreateDescriptorPool(context.device, poolInfo, null, pool),
                     "vkCreateDescriptorPool");
@@ -475,91 +488,110 @@ public class VulkanRenderer {
                     "vkAllocateDescriptorSets");
             descriptorSet = set[0];
 
-            if (atlasTexture != null && lightmapTexture != null) {
-                VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo.calloc(2, stack);
+            if (atlasTexture != null && (!lightmapEnabled || lightmapTexture != null)) {
+                VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo
+                        .calloc(samplerCount, stack);
                 imageInfo.get(0).sampler(atlasTexture.sampler)
                         .imageView(atlasTexture.view)
                         .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                imageInfo.get(1).sampler(lightmapTexture.sampler)
-                        .imageView(lightmapTexture.view)
-                        .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(2, stack);
+                if (lightmapEnabled) {
+                    imageInfo.get(1).sampler(lightmapTexture.sampler)
+                            .imageView(lightmapTexture.view)
+                            .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+                VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(samplerCount, stack);
                 write.get(0).sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
                         .dstSet(descriptorSet)
                         .dstBinding(0)
                         .descriptorCount(1)
                         .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                         .pImageInfo(imageInfo);
-                write.get(1).sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
-                        .dstSet(descriptorSet)
-                        .dstBinding(1)
-                        .descriptorCount(1)
-                        .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                        .pImageInfo(imageInfo);
+                if (lightmapEnabled) {
+                    write.get(1).sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+                            .dstSet(descriptorSet)
+                            .dstBinding(1)
+                            .descriptorCount(1)
+                            .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                            .pImageInfo(imageInfo);
+                }
                 VK10.vkUpdateDescriptorSets(context.device, write, null);
             }
         }
     }
 
     private void createTerrainPipelines() {
-        String vertexGlsl = "#version 450\n"
-                + "layout(push_constant) uniform Push { mat4 mvp; vec4 chunkOrigin; vec4 eye; vec4 fog; } push;\n"
-                + "layout(location = 0) in vec3 inPos;\n"
-                + "layout(location = 1) in vec4 inColor;\n"
-                + "layout(location = 2) in vec2 inUV;\n"
-                + "layout(location = 3) in vec2 inLM;\n"
-                + "layout(location = 0) out vec3 vColor;\n"
-                + "layout(location = 1) out vec2 vUV;\n"
-                + "layout(location = 2) out vec2 vLM;\n"
-                + "layout(location = 3) out float vDist;\n"
-                + "void main() {\n"
-                + "    vec3 worldPos = push.chunkOrigin.xyz + inPos;\n"
-                + "    gl_Position = push.mvp * vec4(worldPos, 1.0);\n"
-                + "    vColor = inColor.bgr;\n"
-                + "    vUV = inUV;\n"
-                + "    vLM = inLM;\n"
-                + "    vDist = length(worldPos - push.eye.xyz);\n"
-                + "}\n";
-        String fragmentOpaque = "#version 450\n"
-                + "layout(push_constant) uniform Push { mat4 mvp; vec4 chunkOrigin; vec4 eye; vec4 fog; } push;\n"
-                + "layout(binding = 0) uniform sampler2D atlas;\n"
-                + "layout(binding = 1) uniform sampler2D lightmap;\n"
-                + "layout(location = 0) in vec3 vColor;\n"
-                + "layout(location = 1) in vec2 vUV;\n"
-                + "layout(location = 2) in vec2 vLM;\n"
-                + "layout(location = 3) in float vDist;\n"
-                + "layout(location = 0) out vec4 outColor;\n"
-                + "void main() {\n"
-                + "    vec4 base = texture(atlas, vUV);\n"
-                + "    if (base.a < 0.1) discard;\n"
-                + "    vec3 light = texture(lightmap, vLM / 256.0 + vec2(0.004)).rgb;\n"
-                + "    vec3 c = base.bgr * vColor * light;\n"  // MC packs vertex color bytes as B,G,R
-                + "    float f = clamp((vDist - push.eye.w) / max(push.fog.x - push.eye.w, 0.001), 0.0, 1.0);\n"
-                + "    outColor = vec4(mix(c, push.fog.yzw, f), 1.0);\n"
-                + "}\n";
-        String fragmentTranslucent = "#version 450\n"
-                + "layout(push_constant) uniform Push { mat4 mvp; vec4 chunkOrigin; vec4 eye; vec4 fog; } push;\n"
-                + "layout(binding = 0) uniform sampler2D atlas;\n"
-                + "layout(binding = 1) uniform sampler2D lightmap;\n"
-                + "layout(location = 0) in vec3 vColor;\n"
-                + "layout(location = 1) in vec2 vUV;\n"
-                + "layout(location = 2) in vec2 vLM;\n"
-                + "layout(location = 3) in float vDist;\n"
-                + "layout(location = 0) out vec4 outColor;\n"
-                + "void main() {\n"
-                + "    vec4 base = texture(atlas, vUV);\n"
-                + "    vec3 light = texture(lightmap, vLM / 256.0 + vec2(0.004)).rgb;\n"
-                + "    vec3 c = base.bgr * vColor * light;\n"
-                + "    float f = clamp((vDist - push.eye.w) / max(push.fog.x - push.eye.w, 0.001), 0.0, 1.0);\n"
-                + "    outColor = vec4(mix(c, push.fog.yzw, f), base.a);\n"
-                + "}\n";
+        String vertexGlsl;
+        String fragmentGlsl;
+        if (lightmapEnabled) {
+            vertexGlsl = "#version 450\n"
+                    + "layout(push_constant) uniform Push { mat4 mvp; vec4 chunkOrigin; vec4 eye; vec4 fog; } push;\n"
+                    + "layout(location = 0) in vec3 inPos;\n"
+                    + "layout(location = 1) in vec4 inColor;\n"
+                    + "layout(location = 2) in vec2 inUV;\n"
+                    + "layout(location = 3) in vec2 inLM;\n"
+                    + "layout(location = 0) out vec3 vColor;\n"
+                    + "layout(location = 1) out vec2 vUV;\n"
+                    + "layout(location = 2) out vec2 vLM;\n"
+                    + "layout(location = 3) out float vDist;\n"
+                    + "void main() {\n"
+                    + "    vec3 worldPos = push.chunkOrigin.xyz + inPos;\n"
+                    + "    gl_Position = push.mvp * vec4(worldPos, 1.0);\n"
+                    + "    vColor = inColor.rgb;\n"
+                    + "    vUV = inUV;\n"
+                    + "    vLM = inLM;\n"
+                    + "    vDist = length(worldPos - push.eye.xyz);\n"
+                    + "}\n";
+            fragmentGlsl = "#version 450\n"
+                    + "layout(push_constant) uniform Push { mat4 mvp; vec4 chunkOrigin; vec4 eye; vec4 fog; } push;\n"
+                    + "layout(binding = 0) uniform sampler2D atlas;\n"
+                    + "layout(binding = 1) uniform sampler2D lightmap;\n"
+                    + "layout(location = 0) in vec3 vColor;\n"
+                    + "layout(location = 1) in vec2 vUV;\n"
+                    + "layout(location = 2) in vec2 vLM;\n"
+                    + "layout(location = 3) in float vDist;\n"
+                    + "layout(location = 0) out vec4 outColor;\n"
+                    + "void main() {\n"
+                    + "    vec4 base = texture(atlas, vUV);\n"
+                    + "    if (base.a < 0.1) discard;\n"
+                    + "    vec3 light = texture(lightmap, vLM.yx / 256.0 + vec2(0.004)).rgb;\n"
+                    + "    vec3 c = base.rgb * vColor * light;\n"
+                    + "    float f = clamp((vDist - push.eye.w) / max(push.fog.x - push.eye.w, 0.001), 0.0, 1.0);\n"
+                    + "    outColor = vec4(mix(c, push.fog.yzw, f), 1.0);\n"
+                    + "}\n";
+        } else {
+            // proven-correct W4 baseline: textured, vertex-color tinted, no lightmap/fog
+            vertexGlsl = "#version 450\n"
+                    + "layout(push_constant) uniform Push { mat4 mvp; vec4 chunkOrigin; } push;\n"
+                    + "layout(location = 0) in vec3 inPos;\n"
+                    + "layout(location = 1) in vec4 inColor;\n"
+                    + "layout(location = 2) in vec2 inUV;\n"
+                    + "layout(location = 0) out vec3 vColor;\n"
+                    + "layout(location = 1) out vec2 vUV;\n"
+                    + "void main() {\n"
+                    + "    gl_Position = push.mvp * vec4(push.chunkOrigin.xyz + inPos, 1.0);\n"
+                    + "    vColor = inColor.rgb;\n"
+                    + "    vUV = inUV;\n"
+                    + "}\n";
+            fragmentGlsl = "#version 450\n"
+                    + "layout(binding = 0) uniform sampler2D atlas;\n"
+                    + "layout(location = 0) in vec3 vColor;\n"
+                    + "layout(location = 1) in vec2 vUV;\n"
+                    + "layout(location = 0) out vec4 outColor;\n"
+                    + "void main() {\n"
+                    + "    vec4 base = texture(atlas, vUV);\n"
+                    + "    if (base.a < 0.1) discard;\n"
+                    + "    outColor = vec4(base.rgb * vColor, 1.0);\n"
+                    + "}\n";
+        }
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
             // one range covering the whole block: splitting by stage double-books the
             // vertex stage, which the spec forbids
             VkPushConstantRange.Buffer pushRange = VkPushConstantRange.calloc(1, stack)
-                    .stageFlags(VK10.VK_SHADER_STAGE_VERTEX_BIT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT)
-                    .offset(0).size(PUSH_BLOCK_SIZE);
+                    .stageFlags(lightmapEnabled
+                            ? (VK10.VK_SHADER_STAGE_VERTEX_BIT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT)
+                            : VK10.VK_SHADER_STAGE_VERTEX_BIT)
+                    .offset(0).size(lightmapEnabled ? PUSH_BLOCK_SIZE : 80);
             VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO)
                     .pSetLayouts(stack.longs(descriptorSetLayout))
@@ -569,8 +601,8 @@ public class VulkanRenderer {
                     "vkCreatePipelineLayout");
             terrainLayout = layout[0];
 
-            terrainOpaquePipeline = buildTerrainPipeline(stack, vertexGlsl, fragmentOpaque, false);
-            terrainTranslucentPipeline = buildTerrainPipeline(stack, vertexGlsl, fragmentTranslucent, true);
+            terrainOpaquePipeline = buildTerrainPipeline(stack, vertexGlsl, fragmentGlsl, false);
+            terrainTranslucentPipeline = buildTerrainPipeline(stack, vertexGlsl, fragmentGlsl, true);
         }
     }
 
