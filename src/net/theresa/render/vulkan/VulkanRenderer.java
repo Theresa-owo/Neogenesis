@@ -106,6 +106,8 @@ public class VulkanRenderer {
     private long terrainTranslucentPipeline;
 
     private long[] imageRenderFinished = new long[0];
+    private boolean reloadQueued;
+    private boolean prevF9Down;
 
     private VulkanChunkStore chunkStore;
     private int frameCount;
@@ -164,6 +166,12 @@ public class VulkanRenderer {
             chunkStore.tickFrame();
         }
 
+        boolean f9Down = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F9) == GLFW.GLFW_PRESS;
+        if (f9Down && !prevF9Down) {
+            reloadQueued = true;
+        }
+        prevF9Down = f9Down;
+
         Minecraft mc = Minecraft.getMinecraft();
         Entity view = mc.getRenderViewEntity();
         if (mc.theWorld == null || view == null) {
@@ -217,6 +225,11 @@ public class VulkanRenderer {
                     "[VulkanDiag] frame=%d visible=%d hooks=%d uploads=%d eye=%.1f,%.1f,%.1f fogStart=%.0f fogEnd=%.0f",
                     frameCount, vis.size(), VulkanWorldBridge.hookCalls, VulkanWorldBridge.uploadsSeen,
                     eyeX, eyeY, eyeZ, fogStart, fogEnd));
+        }
+
+        if (reloadQueued) {
+            reloadQueued = false;
+            reloadPipelines();
         }
 
         recordWorldFrame(frame.commandBuffer, imageIndex, mvp);
@@ -519,6 +532,42 @@ public class VulkanRenderer {
         }
     }
 
+    /** Reads shaders_vk/<name> when present so shaders can be edited while running. */
+    private String loadShaderSource(String name, String embeddedFallback) {
+        try {
+            java.nio.file.Path path = java.nio.file.Paths.get("shaders_vk", name);
+            if (java.nio.file.Files.exists(path)) {
+                return new String(java.nio.file.Files.readAllBytes(path),
+                        java.nio.charset.StandardCharsets.UTF_8);
+            }
+            java.nio.file.Files.createDirectories(path.getParent());
+            java.nio.file.Files.write(path, embeddedFallback.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            System.err.println("[Vulkan] shader file " + name + " unavailable, using embedded: " + e);
+        }
+        return embeddedFallback;
+    }
+
+    /** Destroys terrain pipelines + layout and rebuilds from current shader sources. */
+    public void reloadPipelines() {
+        context.waitIdle();
+        VK10.vkDestroyPipeline(context.device, terrainOpaquePipeline, null);
+        terrainOpaquePipeline = 0L;
+        VK10.vkDestroyPipeline(context.device, terrainTranslucentPipeline, null);
+        terrainTranslucentPipeline = 0L;
+        if (terrainLayout != 0L) {
+            VK10.vkDestroyPipelineLayout(context.device, terrainLayout, null);
+            terrainLayout = 0L;
+        }
+        try {
+            createTerrainPipelines();
+            System.out.println("[Vulkan] terrain shaders reloaded");
+        } catch (Throwable t) {
+            System.err.println("[Vulkan] shader reload failed, world will not draw until next successful reload: " + t);
+            t.printStackTrace();
+        }
+    }
+
     private void createTerrainPipelines() {
         String vertexGlsl;
         String fragmentGlsl;
@@ -587,6 +636,9 @@ public class VulkanRenderer {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             // one range covering the whole block: splitting by stage double-books the
             // vertex stage, which the spec forbids
+            vertexGlsl = loadShaderSource("terrain.vert", vertexGlsl);
+            fragmentGlsl = loadShaderSource("terrain.frag", fragmentGlsl);
+
             VkPushConstantRange.Buffer pushRange = VkPushConstantRange.calloc(1, stack)
                     .stageFlags(lightmapEnabled
                             ? (VK10.VK_SHADER_STAGE_VERTEX_BIT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT)
