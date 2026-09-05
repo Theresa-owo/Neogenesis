@@ -24,10 +24,15 @@ import org.lwjgl.vulkan.VkDescriptorPoolSize;
 import org.lwjgl.vulkan.VkWriteDescriptorSet;
 import org.lwjgl.vulkan.VkExtent2D;
 import org.lwjgl.vulkan.VkExtent3D;
+import org.lwjgl.vulkan.VkBufferImageCopy;
+import org.lwjgl.vulkan.VkBufferCreateInfo;
 import org.lwjgl.vulkan.VkFormatProperties;
 import org.lwjgl.vulkan.VkFramebufferCreateInfo;
 import org.lwjgl.vulkan.VkImageCreateInfo;
+import org.lwjgl.vulkan.VkImageMemoryBarrier;
+import org.lwjgl.vulkan.VkImageSubresourceLayers;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
+import org.lwjgl.vulkan.VkOffset3D;
 import org.lwjgl.vulkan.VkImageViewCreateInfo;
 import org.lwjgl.vulkan.VkMemoryAllocateInfo;
 import org.lwjgl.vulkan.VkMemoryRequirements;
@@ -100,6 +105,8 @@ public class VulkanRenderer {
     private long descriptorSetLayout;
     private long descriptorPool;
     private long descriptorSet;
+    /** Same atlas view sampled with the no-mip sampler; CUTOUT draws with this. */
+    private long descriptorSetCutout;
 
     private long terrainLayout;
     private long terrainOpaquePipeline;
@@ -108,7 +115,17 @@ public class VulkanRenderer {
     private long[] imageRenderFinished = new long[0];
     private boolean reloadQueued;
     private boolean prevF9Down;
+    private boolean prevF8Down;
     private int staleDraws;
+    private long drawRangeSkips;
+
+    private static final int DUMP_FRAMES = 90;
+    private int dumpRemaining;
+    private int dumpIndex;
+    private boolean dumpRecordedThisFrame;
+    private long dumpBuffer;
+    private long dumpMemory;
+    private java.nio.ByteBuffer dumpMapped;
 
     private VulkanChunkStore chunkStore;
     private int frameCount;
@@ -176,6 +193,16 @@ public class VulkanRenderer {
         }
         prevF9Down = f9Down;
 
+        // F8 arms a burst frame dump (raw BGRA files under frameDump/) used to
+        // classify flicker offline via inter-frame pixel diffing
+        boolean f8Down = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F8) == GLFW.GLFW_PRESS;
+        if (f8Down && !prevF8Down && dumpRemaining == 0) {
+            dumpRemaining = DUMP_FRAMES;
+            new java.io.File("frameDump").mkdirs();
+            System.out.println("[VkFrameDump] armed: " + DUMP_FRAMES + " frames -> frameDump/");
+        }
+        prevF8Down = f8Down;
+
         Minecraft mc = Minecraft.getMinecraft();
         Entity view = mc.getRenderViewEntity();
         if (mc.theWorld == null || view == null) {
@@ -235,9 +262,12 @@ public class VulkanRenderer {
             staleDraws = 0;
             List<RenderChunk> vis = Minecraft.getMinecraft().renderGlobal.getVulkanVisibleChunks();
             System.out.println(String.format(
-                    "[VulkanDiag] frame=%d visible=%d hooks=%d uploads=%d staleDraws=%d store=%d eye=%.1f,%.1f,%.1f",
+                    "[VulkanDiag] frame=%d visible=%d hooks=%d uploads=%d staleDraws=%d store=%d"
+                            + " rangeSkips=%d staleUploadDrops=%d eye=%.1f,%.1f,%.1f",
                     frameCount, vis.size(), VulkanWorldBridge.hookCalls, VulkanWorldBridge.uploadsSeen,
-                    staleDraws, chunkStore.size(), eyeX, eyeY, eyeZ));
+                    staleDraws, chunkStore.size(), drawRangeSkips, chunkStore.staleUploadDrops,
+                    eyeX, eyeY, eyeZ));
+            drawRangeSkips = 0;
         }
 
         if (reloadQueued) {
@@ -256,6 +286,29 @@ public class VulkanRenderer {
                     .pCommandBuffers(stack.pointers(frame.commandBuffer))
                     .pSignalSemaphores(stack.longs(imageRenderFinished[imageIndex]));
             VulkanContext.check(VK10.vkQueueSubmit(context.graphicsQueue, submitInfo, frame.fence), "vkQueueSubmit");
+        }
+
+        if (dumpRecordedThisFrame) {
+            // the readback copy ran inside this submit; block once, then write
+            // the raw BGRA frame for offline inter-frame diffing
+            VulkanContext.check(VK10.vkWaitForFences(context.device, frame.fence, true, 5_000_000_000L),
+                    "vkWaitForFences (frame dump)");
+            dumpRecordedThisFrame = false;
+            dumpRemaining--;
+            java.nio.ByteBuffer dumpView = dumpMapped.duplicate().order(java.nio.ByteOrder.nativeOrder());
+            byte[] pixels = new byte[dumpView.remaining()];
+            dumpView.get(pixels);
+            java.nio.file.Path out = java.nio.file.Paths.get("frameDump",
+                    String.format("frame_%05d_game%08d.raw", dumpIndex++, frameCount));
+            try {
+                java.nio.file.Files.write(out, pixels);
+            } catch (java.io.IOException e) {
+                System.err.println("[VkFrameDump] write failed: " + e);
+                dumpRemaining = 0;
+            }
+            System.out.printf("[VkFrameDump] %s uploads=%d visible=%d%n", out.getFileName(),
+                    VulkanWorldBridge.uploadsSeen,
+                    Minecraft.getMinecraft().renderGlobal.getVulkanVisibleChunks().size());
         }
 
         boolean suboptimal = swapchain.present(context.presentQueue, imageRenderFinished[imageIndex], imageIndex);
@@ -314,11 +367,13 @@ public class VulkanRenderer {
                 farPlane, true);
         projection.mul(new Matrix4f().scale(1.0f, -1.0f, 1.0f));
 
-        // mirrors the vanilla modelview: rotateX(pitch) * rotateY(yaw+180) * translate(-eye)
+        // mirrors the vanilla modelview orientation, WITHOUT the translate(-eye):
+        // the camera-relative path below feeds the GPU (chunkOrigin - eye)
+        // computed in double precision per chunk, so the float32 matrix never
+        // cancels large world coordinates against each other
         Matrix4f viewMatrix = new Matrix4f()
                 .rotateX((float) Math.toRadians(pitch))
-                .rotateY((float) Math.toRadians(yaw + 180.0f))
-                .translate((float) -eye.xCoord, (float) -eye.yCoord, (float) -eye.zCoord);
+                .rotateY((float) Math.toRadians(yaw + 180.0f));
 
         return projection.mul(viewMatrix, new Matrix4f());
     }
@@ -343,8 +398,10 @@ public class VulkanRenderer {
             VK10.vkCmdSetScissor(commandBuffer, 0, scissor);
 
             String bisect = System.getProperty("neogenesis.vkBisect", "");
-            if ((atlasTexture != null && (!lightmapEnabled || lightmapTexture != null) && descriptorSet != 0L)
-                    && !bisect.contains("nodesc")) {
+            boolean haveDescriptors = atlasTexture != null
+                    && (!lightmapEnabled || lightmapTexture != null)
+                    && descriptorSet != 0L;
+            if (haveDescriptors && !bisect.contains("nodesc")) {
                 VK10.vkCmdBindDescriptorSets(commandBuffer, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, terrainLayout, 0,
                         stack.longs(descriptorSet), null);
             }
@@ -360,6 +417,55 @@ public class VulkanRenderer {
             }
 
             VK10.vkCmdEndRenderPass(commandBuffer);
+
+            dumpRecordedThisFrame = false;
+            if (dumpRemaining > 0 && ensureDumpBuffer()) {
+                long image = swapchain.images.get(imageIndex);
+                // PRESENT_SRC -> TRANSFER_SRC, copy, back to PRESENT_SRC
+                VkImageMemoryBarrier.Buffer toSrc = VkImageMemoryBarrier.calloc(1, stack)
+                        .sType(VK10.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+                        .srcAccessMask(0)
+                        .dstAccessMask(VK10.VK_ACCESS_TRANSFER_READ_BIT)
+                        .oldLayout(KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+                        .newLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+                        .srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+                        .dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresourceRange(VkImageSubresourceRange.calloc(stack)
+                                .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                                .baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1));
+                VK10.vkCmdPipelineBarrier(commandBuffer,
+                        VK10.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                        null, null, toSrc);
+                VkBufferImageCopy.Buffer copy = VkBufferImageCopy.calloc(1, stack)
+                        .bufferOffset(0)
+                        .bufferRowLength(swapchain.width)
+                        .bufferImageHeight(swapchain.height)
+                        .imageSubresource(VkImageSubresourceLayers.calloc(stack)
+                                .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                                .mipLevel(0).baseArrayLayer(0).layerCount(1))
+                        .imageOffset(VkOffset3D.calloc(stack).set(0, 0, 0))
+                        .imageExtent(VkExtent3D.calloc(stack).set(swapchain.width, swapchain.height, 1));
+                VK10.vkCmdCopyImageToBuffer(commandBuffer, image,
+                        VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dumpBuffer, copy);
+                VkImageMemoryBarrier.Buffer toPresent = VkImageMemoryBarrier.calloc(1, stack)
+                        .sType(VK10.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+                        .srcAccessMask(VK10.VK_ACCESS_TRANSFER_READ_BIT)
+                        .dstAccessMask(0)
+                        .oldLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+                        .newLayout(KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+                        .srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+                        .dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresourceRange(VkImageSubresourceRange.calloc(stack)
+                                .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                                .baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1));
+                VK10.vkCmdPipelineBarrier(commandBuffer,
+                        VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, VK10.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+                        null, null, toPresent);
+                dumpRecordedThisFrame = true;
+            }
+
             VulkanContext.check(VK10.vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer");
         }
     }
@@ -378,18 +484,30 @@ public class VulkanRenderer {
 
             boolean drawTranslucent = Boolean.getBoolean("neogenesis.vkTranslucent");
             for (int layer = LAYER_SOLID; layer <= (drawTranslucent ? LAYER_TRANSLUCENT : LAYER_CUTOUT); layer++) {
-                long buffer = chunkStore.getBuffer(chunk, layer);
-                if (buffer == 0L) {
+                VulkanChunkStore.LayerSnapshot snapshot = chunkStore.getSnapshot(chunk, layer);
+                if (snapshot == null) {
                     continue;
                 }
-                int count = chunkStore.getVertexCount(chunk, layer);
-                if (count <= 0) {
+                long buffer = snapshot.buffer;
+                int count = snapshot.vertexCount;
+                if ((long) count * VulkanChunkStore.VERTEX_STRIDE_BYTES > snapshot.bufferSize) {
+                    // never let vkCmdDraw fetch past the buffer end; garbage
+                    // vertices sample garbage atlas UVs (wrong-tile artifacts)
+                    drawRangeSkips++;
                     continue;
                 }
 
                 if (layer == LAYER_SOLID && !net.theresa.render.vulkan.VulkanWorldBridge
                         .hasFreshMesh(chunk)) {
                     staleDraws++;
+                }
+
+                if (atlasTexture != null && descriptorSet != 0L && !mode.contains("nodesc")) {
+                    long wantedDescriptorSet = layer == LAYER_CUTOUT && descriptorSetCutout != 0L
+                            ? descriptorSetCutout
+                            : descriptorSet;
+                    VK10.vkCmdBindDescriptorSets(commandBuffer, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            terrainLayout, 0, stack.longs(wantedDescriptorSet), null);
                 }
 
                 long wanted = layer == LAYER_TRANSLUCENT ? terrainTranslucentPipeline : terrainOpaquePipeline;
@@ -401,7 +519,11 @@ public class VulkanRenderer {
                 push.clear();
                 mvp.get(push);
                 push.position(64);
-                push.putFloat((float) baseX).putFloat((float) baseY).putFloat((float) baseZ).putFloat(1.0f);
+                // double-precision (origin - eye) per chunk: vertices stay small
+                // numbers near the camera; a float32 -eye in the matrix would
+                // cancel against large world coordinates and jitter vertices
+                push.putFloat((float) (baseX - eyeXd)).putFloat((float) (baseY - eyeYd))
+                        .putFloat((float) (baseZ - eyeZd)).putFloat(1.0f);
                 if (lightmapEnabled) {
                     push.position(80);
                     push.putFloat(eyeX).putFloat(eyeY).putFloat(eyeZ).putFloat(fogStart);
@@ -426,6 +548,58 @@ public class VulkanRenderer {
                 VK10.vkCmdDraw(commandBuffer, count, 1, 0, 0);
             }
         }
+    }
+
+    /** Lazily allocates the host-visible readback buffer for frame dumps. */
+    private boolean ensureDumpBuffer() {
+        long needed = (long) swapchain.width * swapchain.height * 4;
+        if (dumpBuffer != 0L && dumpMapped != null && dumpMapped.capacity() == needed) {
+            return true;
+        }
+        freeDumpBuffer();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkBufferCreateInfo info = VkBufferCreateInfo.calloc(stack)
+                    .sType(VK10.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
+                    .size(needed)
+                    .usage(VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+                    .sharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE);
+            LongBuffer pBuffer = stack.mallocLong(1);
+            VulkanContext.check(VK10.vkCreateBuffer(context.device, info, null, pBuffer), "vkCreateBuffer (dump)");
+            dumpBuffer = pBuffer.get(0);
+
+            VkMemoryRequirements reqs = VkMemoryRequirements.calloc(stack);
+            VK10.vkGetBufferMemoryRequirements(context.device, dumpBuffer, reqs);
+            VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
+                    .sType(VK10.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+                    .allocationSize(reqs.size())
+                    .memoryTypeIndex(context.memoryTypeIndex(reqs.memoryTypeBits(),
+                            VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+            LongBuffer pMemory = stack.mallocLong(1);
+            VulkanContext.check(VK10.vkAllocateMemory(context.device, alloc, null, pMemory), "vkAllocateMemory (dump)");
+            dumpMemory = pMemory.get(0);
+            VulkanContext.check(VK10.vkBindBufferMemory(context.device, dumpBuffer, dumpMemory, 0L),
+                    "vkBindBufferMemory (dump)");
+
+            org.lwjgl.PointerBuffer pData = stack.mallocPointer(1);
+            VulkanContext.check(VK10.vkMapMemory(context.device, dumpMemory, 0, needed, 0, pData), "vkMapMemory (dump)");
+            dumpMapped = pData.getByteBuffer(0, (int) needed);
+            return true;
+        }
+    }
+
+    private void freeDumpBuffer() {
+        if (dumpMemory != 0L) {
+            VK10.vkUnmapMemory(context.device, dumpMemory);
+        }
+        if (dumpBuffer != 0L) {
+            VK10.vkDestroyBuffer(context.device, dumpBuffer, null);
+        }
+        if (dumpMemory != 0L) {
+            VK10.vkFreeMemory(context.device, dumpMemory, null);
+        }
+        dumpBuffer = 0L;
+        dumpMemory = 0L;
+        dumpMapped = null;
     }
 
     private void beginRenderPass(VkCommandBuffer commandBuffer, int imageIndex, MemoryStack stack) {
@@ -502,26 +676,30 @@ public class VulkanRenderer {
 
             VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO)
-                    .maxSets(1);
+                    .maxSets(2);
             poolInfo.pPoolSizes(VkDescriptorPoolSize.calloc(1, stack)
-                    .type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(samplerCount));
+                    .type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(samplerCount * 2));
             long[] pool = new long[1];
             VulkanContext.check(VK10.vkCreateDescriptorPool(context.device, poolInfo, null, pool),
                     "vkCreateDescriptorPool");
             descriptorPool = pool[0];
 
+            // set 0: mip-sampled atlas (SOLID / CUTOUT_MIPPED / TRANSLUCENT);
+            // set 1: identical but sampled with the no-mip sampler (CUTOUT)
             VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO)
                     .descriptorPool(descriptorPool)
-                    .pSetLayouts(stack.longs(descriptorSetLayout));
-            long[] set = new long[1];
-            VulkanContext.check(VK10.vkAllocateDescriptorSets(context.device, allocInfo, set),
+                    .pSetLayouts(stack.longs(descriptorSetLayout, descriptorSetLayout));
+            long[] sets = new long[2];
+            VulkanContext.check(VK10.vkAllocateDescriptorSets(context.device, allocInfo, sets),
                     "vkAllocateDescriptorSets");
-            descriptorSet = set[0];
+            descriptorSet = sets[0];
+            descriptorSetCutout = sets[1];
 
             if (atlasTexture != null && (!lightmapEnabled || lightmapTexture != null)) {
                 VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo
-                        .calloc(samplerCount, stack);
+                        .calloc(samplerCount * 2, stack);
                 imageInfo.get(0).sampler(atlasTexture.sampler)
                         .imageView(atlasTexture.view)
                         .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -530,20 +708,44 @@ public class VulkanRenderer {
                             .imageView(lightmapTexture.view)
                             .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 }
-                VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(samplerCount, stack);
+                imageInfo.get(samplerCount).sampler(atlasTexture.samplerNoMip)
+                        .imageView(atlasTexture.view)
+                        .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                if (lightmapEnabled) {
+                    imageInfo.get(samplerCount + 1).sampler(lightmapTexture.sampler)
+                            .imageView(lightmapTexture.view)
+                            .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+                int writeCount = lightmapEnabled ? 4 : 2;
+                VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(writeCount, stack);
                 write.get(0).sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
                         .dstSet(descriptorSet)
                         .dstBinding(0)
                         .descriptorCount(1)
                         .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                        .pImageInfo(imageInfo);
+                        .pImageInfo(imageInfo.slice(0, 1));
                 if (lightmapEnabled) {
                     write.get(1).sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
                             .dstSet(descriptorSet)
                             .dstBinding(1)
                             .descriptorCount(1)
                             .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                            .pImageInfo(imageInfo);
+                            .pImageInfo(imageInfo.slice(1, 1));
+                }
+                int cutoutAtlasIndex = samplerCount;
+                write.get(lightmapEnabled ? 2 : 1).sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+                        .dstSet(descriptorSetCutout)
+                        .dstBinding(0)
+                        .descriptorCount(1)
+                        .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .pImageInfo(imageInfo.slice(cutoutAtlasIndex, 1));
+                if (lightmapEnabled) {
+                    write.get(3).sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+                            .dstSet(descriptorSetCutout)
+                            .dstBinding(1)
+                            .descriptorCount(1)
+                            .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                            .pImageInfo(imageInfo.slice(cutoutAtlasIndex + 1, 1));
                 }
                 VK10.vkUpdateDescriptorSets(context.device, write, null);
             }
@@ -601,6 +803,7 @@ public class VulkanRenderer {
                     + "layout(location = 2) out vec2 vLM;\n"
                     + "layout(location = 3) out float vDist;\n"
                     + "void main() {\n"
+                    + "    // chunkOrigin is camera-relative (origin - eye, computed in double on the CPU)\n"
                     + "    vec3 viewPos = push.chunkOrigin.xyz + inPos;\n"
                     + "    gl_Position = push.mvp * vec4(viewPos, 1.0);\n"
                     + "    vColor = inColor.rgb;\n"
@@ -635,6 +838,7 @@ public class VulkanRenderer {
                     + "layout(location = 0) out vec3 vColor;\n"
                     + "layout(location = 1) out vec2 vUV;\n"
                     + "void main() {\n"
+                    + "    // chunkOrigin is camera-relative (origin - eye, computed in double on the CPU)\n"
                     + "    gl_Position = push.mvp * vec4(push.chunkOrigin.xyz + inPos, 1.0);\n"
                     + "    vColor = inColor.rgb;\n"
                     + "    vUV = inUV;\n"
@@ -705,9 +909,14 @@ public class VulkanRenderer {
             VkPipelineRasterizationStateCreateInfo rasterization = VkPipelineRasterizationStateCreateInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO)
                     .polygonMode(VK10.VK_POLYGON_MODE_FILL)
-                    // culling stays off: MC terrain quads are not consistently wound,
-                    // and vanilla renders them with culling disabled as well
-                    .cullMode(VK10.VK_CULL_MODE_NONE)
+                    // Vanilla renders SOLID, CUTOUT_MIPPED (leaves), and CUTOUT (grass, flowers, ladders, snow)
+                    // with GL_CULL_FACE enabled (GL_BACK, CCW).
+                    // Plants and ladders define double-sided co-planar quads (both front and back faces).
+                    // Without backface culling, both co-planar quads rasterize at the exact same depth,
+                    // causing depth-fighting and texture flickering as camera moves/rotates.
+                    // With Y-flipped projection matrix (Vulkan NDC), world CCW becomes screen CW.
+                    .cullMode(blended ? VK10.VK_CULL_MODE_NONE : VK10.VK_CULL_MODE_BACK_BIT)
+                    .frontFace(VK10.VK_FRONT_FACE_COUNTER_CLOCKWISE)
                     .lineWidth(1.0f);
 
             VkPipelineMultisampleStateCreateInfo multisample = VkPipelineMultisampleStateCreateInfo.calloc(stack)
@@ -988,6 +1197,8 @@ public class VulkanRenderer {
 
     private void recreate() {
         context.waitIdle();
+        dumpRemaining = 0;
+        freeDumpBuffer();
         for (long fb : framebuffers) {
             VK10.vkDestroyFramebuffer(context.device, fb, null);
         }

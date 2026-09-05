@@ -45,6 +45,8 @@ public class VulkanTexture {
     public long memory = NULL;
     public long view = NULL;
     public long sampler = NULL;
+    /** No-mipmap variant of {@link #sampler} (maxLod=0); 0 when not created. */
+    public long samplerNoMip = NULL;
     public int width;
     public int height;
     public int levels;
@@ -129,13 +131,39 @@ public class VulkanTexture {
                 check(vkMapMemory(ctx.device, staging[1], 0, totalSize, 0, pData), "vkMapMemory");
                 ByteBuffer mapped = pData.getByteBuffer(0, (int) totalSize);
 
+                // Validate the GL object and its real mip dimensions, and keep
+                // the caller's binding intact: glGetTexImage reads whatever is
+                // bound to GL_TEXTURE_2D, so a wrong id silently copies another
+                // texture's pixels (or garbage) into the Vulkan atlas.
+                int previousBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+                if (GL11.glIsTexture(glTextureId) == false) {
+                    vkUnmapMemory(ctx.device, staging[1]);
+                    throw new IllegalStateException("VulkanTexture source is not a GL texture: id="
+                            + glTextureId + " (" + width + "x" + height + ")");
+                }
                 GL11.glBindTexture(GL11.GL_TEXTURE_2D, glTextureId);
-                int offset = 0;
-                for (int level = 0; level < levels; level++) {
-                    int bytes = dims[level * 2] * dims[level * 2 + 1] * 4;
-                    ByteBuffer slice = MemoryUtil.memSlice(mapped, offset, bytes);
-                    GL11.glGetTexImage(GL11.GL_TEXTURE_2D, level, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, slice);
-                    offset += bytes;
+                try {
+                    for (int level = 0; level < levels; level++) {
+                        int[] prop = new int[1];
+                        GL11.glGetTexLevelParameteriv(GL11.GL_TEXTURE_2D, level, GL11.GL_TEXTURE_WIDTH, prop);
+                        int realW = prop[0];
+                        GL11.glGetTexLevelParameteriv(GL11.GL_TEXTURE_2D, level, GL11.GL_TEXTURE_HEIGHT, prop);
+                        int realH = prop[0];
+                        if (realW != dims[level * 2] || realH != dims[level * 2 + 1]) {
+                            throw new IllegalStateException("GL mip level " + level + " is " + realW + "x"
+                                    + realH + " but Vulkan image expects " + dims[level * 2] + "x"
+                                    + dims[level * 2 + 1] + " (texture id=" + glTextureId + ")");
+                        }
+                    }
+                    int offset = 0;
+                    for (int level = 0; level < levels; level++) {
+                        int bytes = dims[level * 2] * dims[level * 2 + 1] * 4;
+                        ByteBuffer slice = MemoryUtil.memSlice(mapped, offset, bytes);
+                        GL11.glGetTexImage(GL11.GL_TEXTURE_2D, level, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, slice);
+                        offset += bytes;
+                    }
+                } finally {
+                    GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousBinding);
                 }
                 if (Boolean.getBoolean("neogenesis.vkMipProbe")) {
                     for (int level = 0; level < levels; level++) {
@@ -358,6 +386,14 @@ public class VulkanTexture {
         LongBuffer pSampler = stack.mallocLong(1);
         check(vkCreateSampler(ctx.device, info, null, pSampler), "vkCreateSampler");
         sampler = pSampler.get(0);
+
+        // GL_NEAREST-equivalent sampler for alpha-tested layers. Vanilla draws
+        // CUTOUT with setBlurMipmap(false, false) -> pure NEAREST (no mip) so
+        // transparent texels never get mip-averaged below the 0.1 discard
+        // threshold; sampling mips here makes foliage flicker as the LOD slides.
+        info.maxLod(0.0f);
+        check(vkCreateSampler(ctx.device, info, null, pSampler), "vkCreateSampler (no-mip)");
+        samplerNoMip = pSampler.get(0);
     }
 
     /** Null-safe teardown of sampler, view, memory, image and the upload pool. */
@@ -368,6 +404,10 @@ public class VulkanTexture {
         if (sampler != NULL) {
             vkDestroySampler(ctx.device, sampler, null);
             sampler = NULL;
+        }
+        if (samplerNoMip != NULL) {
+            vkDestroySampler(ctx.device, samplerNoMip, null);
+            samplerNoMip = NULL;
         }
         if (view != NULL) {
             vkDestroyImageView(ctx.device, view, null);

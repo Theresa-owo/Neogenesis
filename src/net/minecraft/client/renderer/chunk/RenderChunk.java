@@ -77,6 +77,15 @@ public class RenderChunk {
     private RenderGlobal.ContainerLocalRenderInformation renderInfo = new RenderGlobal.ContainerLocalRenderInformation(
             this, (EnumFacing) null, 0);
     public AabbFrame boundingBoxParent;
+    private long vulkanGeneration;
+
+    public synchronized long nextVulkanGeneration() {
+        return ++this.vulkanGeneration;
+    }
+
+    public synchronized long getVulkanGeneration() {
+        return this.vulkanGeneration;
+    }
 
     public RenderChunk(World worldIn, RenderGlobal renderGlobalIn, BlockPos blockPosIn, int indexIn) {
         this.world = worldIn;
@@ -106,6 +115,12 @@ public class RenderChunk {
 
     public void setPosition(BlockPos pos) {
         this.stopCompileTask();
+        // pooled RenderChunks get repositioned as the player moves; the Vulkan
+        // store keys by object, so the entry for the OLD position must go or
+        // the new location renders the previous location's mesh
+        if (net.theresa.render.vulkan.VulkanWorldBridge.isActive()) {
+            net.theresa.render.vulkan.VulkanWorldBridge.removeChunk(this);
+        }
         this.position = pos;
         int i = 8;
         this.regionX = pos.getX() >> i << i;

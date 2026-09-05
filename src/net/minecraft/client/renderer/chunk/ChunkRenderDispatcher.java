@@ -212,13 +212,14 @@ public class ChunkRenderDispatcher {
     public static int uploadOnMainThread;
 
     public ListenableFuture<Object> uploadChunk(final EnumWorldBlockLayer player, final WorldRenderer p_178503_2_,
-            final RenderChunk chunkRenderer, final CompiledChunk compiledChunkIn) {
+            final RenderChunk chunkRenderer, final CompiledChunk compiledChunkIn,
+            final long vulkanGeneration, final net.minecraft.util.BlockPos vulkanPosition) {
         uploadAttempts++;
         if (Minecraft.getMinecraft().isCallingFromMinecraftThread()) {
             uploadOnMainThread++;
             if (OpenGlHelper.useVbo()) {
                 this.uploadVertexBuffer(p_178503_2_, chunkRenderer.getVertexBufferByLayer(player.ordinal()),
-                        chunkRenderer, player);
+                        chunkRenderer, player, vulkanGeneration, vulkanPosition);
             } else {
                 this.uploadDisplayList(p_178503_2_,
                         ((ListedRenderChunk) chunkRenderer).getDisplayList(player, compiledChunkIn), chunkRenderer);
@@ -227,7 +228,7 @@ public class ChunkRenderDispatcher {
             p_178503_2_.setTranslation(0.0D, 0.0D, 0.0D);
             return Futures.<Object>immediateFuture((Object) null);
         }
-        ListenableFutureTask<Object> listenablefuturetask = ListenableFutureTask.<Object>create(() -> ChunkRenderDispatcher.this.uploadChunk(player, p_178503_2_, chunkRenderer, compiledChunkIn), (Object) null);
+        ListenableFutureTask<Object> listenablefuturetask = ListenableFutureTask.<Object>create(() -> ChunkRenderDispatcher.this.uploadChunk(player, p_178503_2_, chunkRenderer, compiledChunkIn, vulkanGeneration, vulkanPosition), (Object) null);
 
         synchronized (this.queueChunkUploads) {
             this.queueChunkUploads.add(listenablefuturetask);
@@ -245,7 +246,7 @@ public class ChunkRenderDispatcher {
     }
 
     private void uploadVertexBuffer(WorldRenderer p_178506_1_, VertexBuffer vertexBufferIn, RenderChunk chunkRenderer,
-            EnumWorldBlockLayer layer) {
+            EnumWorldBlockLayer layer, long vulkanGeneration, net.minecraft.util.BlockPos vulkanPosition) {
         // Capture the mesh BEFORE VertexBufferUploader.draw() resets the WorldRenderer.
         // Vulkan has no GL_QUADS topology, so expand quads to triangles for the store;
         // getByteBuffer()/getVertexCount() then reflect the triangle buffer.
@@ -256,14 +257,26 @@ public class ChunkRenderDispatcher {
                 p_178506_1_.quadsToTriangles();
             }
             vulkanCount = p_178506_1_.getVertexCount();
-            java.nio.ByteBuffer source = p_178506_1_.getByteBuffer();
-            vulkanData = source.slice();
+            java.nio.ByteBuffer source = p_178506_1_.getByteBuffer().duplicate();
+            vulkanData = java.nio.ByteBuffer.allocateDirect(source.remaining());
+            vulkanData.put(source);
+            vulkanData.flip();
+            if (net.theresa.render.vulkan.VulkanWorldBridge.isCrcEnabled()) {
+                System.out.printf("[VkMeshCrc] capture chunk=%s layer=%s gen=%d crc=%08x%n",
+                        chunkRenderer.getPosition(), layer, vulkanGeneration,
+                        net.theresa.render.vulkan.VulkanWorldBridge.meshCrc(vulkanData));
+            }
+            vertexBufferIn.setDrawMode(GL11.GL_TRIANGLES);
+            // The first queued upload for a compile applies that compile's
+            // layer states atomically with the new meshes, so stale layers
+            // drop in the same batch the fresh ones land (no vanish window).
+            net.theresa.render.vulkan.VulkanWorldBridge.applyPendingLayerStates(chunkRenderer, vulkanGeneration);
         }
         this.vertexUploader.setVertexBuffer(vertexBufferIn);
         this.vertexUploader.draw(p_178506_1_);
         if (vulkanData != null && vulkanCount > 0) {
             net.theresa.render.vulkan.VulkanWorldBridge.uploadChunk(chunkRenderer, layer.ordinal(),
-                    vulkanData, vulkanCount);
+                    vulkanData, vulkanCount, vulkanGeneration, vulkanPosition);
         }
     }
 

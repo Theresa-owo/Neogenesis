@@ -4,6 +4,7 @@ import com.google.common.collect.Lists;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 import net.minecraft.client.renderer.RegionRenderCacheBuilder;
+import net.minecraft.util.BlockPos;
 
 public class ChunkCompileTaskGenerator {
 
@@ -11,6 +12,8 @@ public class ChunkCompileTaskGenerator {
     private final ReentrantLock lock = new ReentrantLock();
     private final List<Runnable> listFinishRunnables = Lists.<Runnable>newArrayList();
     private final ChunkCompileTaskGenerator.Type type;
+    private final long vulkanGeneration;
+    private final BlockPos vulkanPosition;
     private RegionRenderCacheBuilder regionRenderCacheBuilder;
     private CompiledChunk compiledChunk;
     private ChunkCompileTaskGenerator.Status status = ChunkCompileTaskGenerator.Status.PENDING;
@@ -19,6 +22,16 @@ public class ChunkCompileTaskGenerator {
     public ChunkCompileTaskGenerator(RenderChunk renderChunkIn, ChunkCompileTaskGenerator.Type typeIn) {
         this.renderChunk = renderChunkIn;
         this.type = typeIn;
+        this.vulkanGeneration = renderChunkIn.nextVulkanGeneration();
+        this.vulkanPosition = new BlockPos(renderChunkIn.getPosition());
+    }
+
+    public long getVulkanGeneration() {
+        return this.vulkanGeneration;
+    }
+
+    public BlockPos getVulkanPosition() {
+        return this.vulkanPosition;
     }
 
     public ChunkCompileTaskGenerator.Status getStatus() {

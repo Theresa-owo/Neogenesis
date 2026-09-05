@@ -109,7 +109,14 @@ public class ChunkRenderWorker implements Runnable {
                 for (EnumWorldBlockLayer enumworldblocklayer : EnumWorldBlockLayer.values()) {
                     layerStarted[enumworldblocklayer.ordinal()] = lvt_7_1_.isLayerStarted(enumworldblocklayer);
                 }
-                net.theresa.render.vulkan.VulkanWorldBridge.markLayerStates(generator.getRenderChunk(), layerStarted);
+                // Do NOT clear store layers here on the worker thread: the mesh
+                // uploads for the started layers are only queued below and drain
+                // on the frame thread later; clearing now opens a multi-frame
+                // window where sparse layers (cutout foliage) vanish then return.
+                // The states travel with the queued uploads instead.
+                net.theresa.render.vulkan.VulkanWorldBridge.setPendingLayerStates(
+                        generator.getRenderChunk(), layerStarted, generator.getVulkanGeneration(),
+                        generator.getVulkanPosition());
             }
 
             if (chunkcompiletaskgenerator$type == ChunkCompileTaskGenerator.Type.REBUILD_CHUNK) {
@@ -117,14 +124,16 @@ public class ChunkRenderWorker implements Runnable {
                     if (lvt_7_1_.isLayerStarted(enumworldblocklayer)) {
                         lvt_8_1_.add(this.chunkRenderDispatcher.uploadChunk(enumworldblocklayer,
                                 generator.getRegionRenderCacheBuilder().getWorldRendererByLayer(enumworldblocklayer),
-                                generator.getRenderChunk(), lvt_7_1_));
+                                generator.getRenderChunk(), lvt_7_1_, generator.getVulkanGeneration(),
+                                generator.getVulkanPosition()));
                     }
                 }
             } else if (chunkcompiletaskgenerator$type == ChunkCompileTaskGenerator.Type.RESORT_TRANSPARENCY) {
                 lvt_8_1_.add(this.chunkRenderDispatcher.uploadChunk(
                         EnumWorldBlockLayer.TRANSLUCENT, generator.getRegionRenderCacheBuilder()
                                 .getWorldRendererByLayer(EnumWorldBlockLayer.TRANSLUCENT),
-                        generator.getRenderChunk(), lvt_7_1_));
+                        generator.getRenderChunk(), lvt_7_1_, generator.getVulkanGeneration(),
+                        generator.getVulkanPosition()));
             }
 
             final ListenableFuture<List<Object>> listenablefuture = Futures.allAsList(lvt_8_1_);

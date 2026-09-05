@@ -115,7 +115,8 @@ tasks.register('runClient', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     workingDir = rootDir
     jvmArgs '-Xmx2G', '-Dfile.encoding=UTF-8',
-            "-Dneogenesis.renderer=${providers.gradleProperty('renderer').orElse('opengl')}"
+            "-Dneogenesis.renderer=${project.findProperty('renderer') ?: 'opengl'}"
+    systemProperties System.properties
     args '--accessToken', '0',
          '--username', 'Theresa',
          '--version', 'Neogenesis',

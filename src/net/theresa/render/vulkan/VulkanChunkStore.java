@@ -49,6 +49,23 @@ public class VulkanChunkStore {
         long buffer;
         long memory;
         int vertexCount;
+        long bufferSize;
+        long generation;
+    }
+
+    /** Immutable, atomically-read view of one uploaded chunk layer. */
+    public static final class LayerSnapshot {
+        public final long buffer;
+        public final int vertexCount;
+        public final long bufferSize;
+        public final long generation;
+
+        private LayerSnapshot(long buffer, int vertexCount, long bufferSize, long generation) {
+            this.buffer = buffer;
+            this.vertexCount = vertexCount;
+            this.bufferSize = bufferSize;
+            this.generation = generation;
+        }
     }
 
     /** One copy within a (single-submit) batch: destination plus staging offset. */
@@ -58,17 +75,19 @@ public class VulkanChunkStore {
         final ByteBuffer data;
         final int vertexCount;
         final int bytes;
+        final long generation;
         final long dstBuffer;
         final long dstMemory;
         final long srcOffset;
 
-        StagedCopy(Object chunk, int layer, ByteBuffer data, int vertexCount,
+        StagedCopy(Object chunk, int layer, ByteBuffer data, int vertexCount, long generation,
                    long dstBuffer, long dstMemory, long srcOffset) {
             this.chunk = chunk;
             this.layer = layer;
             this.data = data;
             this.vertexCount = vertexCount;
             this.bytes = data.remaining();
+            this.generation = generation;
             this.dstBuffer = dstBuffer;
             this.dstMemory = dstMemory;
             this.srcOffset = srcOffset;
@@ -117,15 +136,15 @@ public class VulkanChunkStore {
      * buffer for (chunk, layer), replacing any previous buffer for that key.
      * The replaced buffer is destroyed only after the copy has completed.
      */
-    public void upload(Object chunk, int layer, ByteBuffer data, int vertexCount) {
-        uploadBatch(Collections.singletonList(new UploadRequest(chunk, layer, data, vertexCount)));
+    public void upload(Object chunk, int layer, ByteBuffer data, int vertexCount, long generation) {
+        uploadBatch(Collections.singletonList(new UploadRequest(chunk, layer, data, vertexCount, generation)));
     }
 
     /**
      * Batched upload: one shared staging buffer, one submit, one fence wait
      * for the whole list. Requests with empty data clear their layer instead.
      */
-    public void uploadBatch(List<UploadRequest> requests) {
+    public synchronized void uploadBatch(List<UploadRequest> requests) {
         if (requests == null || requests.isEmpty()) {
             return;
         }
@@ -144,11 +163,23 @@ public class VulkanChunkStore {
                 replaced.add(clearLayer(request.chunk, request.layer));
                 continue;
             }
+            int expected = request.vertexCount * VERTEX_STRIDE_BYTES;
+            if (request.data.remaining() != expected) {
+                throw new IllegalStateException("Chunk mesh byte/count mismatch: bytes="
+                        + request.data.remaining() + " vertexCount=" + request.vertexCount
+                        + " stride=" + VERTEX_STRIDE_BYTES + " layer=" + request.layer
+                        + " generation=" + request.generation + " chunk=" + request.chunk);
+            }
+            if (request.vertexCount % 3 != 0) {
+                throw new IllegalStateException("Chunk mesh vertexCount not triangle-aligned: "
+                        + request.vertexCount + " layer=" + request.layer
+                        + " generation=" + request.generation + " chunk=" + request.chunk);
+            }
             long[] dst = createBuffer(request.data.remaining(),
                     VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
             copies.add(new StagedCopy(request.chunk, request.layer, request.data, request.vertexCount,
-                    dst[0], dst[1], stagingBytes));
+                    request.generation, dst[0], dst[1], stagingBytes));
             stagingBytes += request.data.remaining();
         }
         if (copies.isEmpty()) {
@@ -237,7 +268,7 @@ public class VulkanChunkStore {
      * Drops stored meshes for layers reported empty by the latest compile.
      * Called from the worker path so ghost meshes cannot outlive their data.
      */
-    public void markLayerStates(Object chunk, boolean[] layerStarted) {
+    public synchronized void markLayerStates(Object chunk, boolean[] layerStarted, long generation) {
         if (ctx.device == null) {
             return;
         }
@@ -246,13 +277,14 @@ public class VulkanChunkStore {
             return;
         }
         for (int layer = 0; layer < layers.length && layer < layerStarted.length; layer++) {
-            if (!layerStarted[layer] && layers[layer] != null) {
-                retired.add(new Retired(layers[layer].buffer, layers[layer].memory, retireClock));
+            LayerData existing = layers[layer];
+            if (!layerStarted[layer] && existing != null && generation >= existing.generation) {
+                retired.add(new Retired(existing.buffer, existing.memory, retireClock));
                 layers[layer] = null;
-                if (isEmptyLayers(layers)) {
-                    chunks.remove(chunk);
-                }
             }
+        }
+        if (isEmptyLayers(layers)) {
+            chunks.remove(chunk);
         }
     }
 
@@ -265,7 +297,7 @@ public class VulkanChunkStore {
         return true;
     }
 
-    public void remove(Object chunk) {
+    public synchronized void remove(Object chunk) {
         if (ctx.device == null) {
             return;
         }
@@ -280,7 +312,7 @@ public class VulkanChunkStore {
     }
 
     /** World change: destroys every stored buffer. */
-    public void clear() {
+    public synchronized void clear() {
         if (ctx.device == null) {
             chunks.clear();
             return;
@@ -295,24 +327,38 @@ public class VulkanChunkStore {
         chunks.clear();
     }
 
-    public int size() {
+    public synchronized int size() {
         return chunks.size();
     }
 
     /** Buffer handle for (chunk, layer) or 0 when not present. */
-    public long getBuffer(Object chunk, int layer) {
+    public synchronized long getBuffer(Object chunk, int layer) {
         LayerData data = lookup(chunk, layer);
         return data == null ? 0L : data.buffer;
     }
 
     /** Vertex count for (chunk, layer) or 0 when not present. */
-    public int getVertexCount(Object chunk, int layer) {
+    public synchronized int getVertexCount(Object chunk, int layer) {
         LayerData data = lookup(chunk, layer);
         return data == null ? 0 : data.vertexCount;
     }
 
+    /**
+     * Atomic draw-time view of one layer: buffer, count and size from the SAME
+     * stored generation. Separate getBuffer/getVertexCount calls can straddle a
+     * concurrent upload replacement and pair an old buffer with a new count,
+     * which makes vkCmdDraw read past the buffer end and fetch garbage UVs.
+     */
+    public synchronized LayerSnapshot getSnapshot(Object chunk, int layer) {
+        LayerData data = lookup(chunk, layer);
+        if (data == null || data.buffer == 0L || data.vertexCount <= 0) {
+            return null;
+        }
+        return new LayerSnapshot(data.buffer, data.vertexCount, data.bufferSize, data.generation);
+    }
+
     /** clear() plus releasing the store's own command pool and fence. */
-    public void destroy() {
+    public synchronized void destroy() {
         for (LayerData[] layers : chunks.values()) {
             destroyAllLayers(layers);
         }
@@ -355,13 +401,35 @@ public class VulkanChunkStore {
     private LayerData store(StagedCopy copy) {
         LayerData[] layers = chunks.computeIfAbsent(copy.chunk, key -> new LayerData[LAYER_COUNT]);
         LayerData previous = layers[copy.layer];
+        if (previous != null && copy.generation < previous.generation) {
+            // An older compile finished after a newer one already landed; drop
+            // the stale mesh instead of letting it overwrite the fresh one.
+            staleUploadDrops++;
+            return copyAsRetired(copy);
+        }
         LayerData fresh = new LayerData();
         fresh.buffer = copy.dstBuffer;
         fresh.memory = copy.dstMemory;
         fresh.vertexCount = copy.vertexCount;
+        fresh.bufferSize = copy.bytes;
+        fresh.generation = copy.generation;
         layers[copy.layer] = fresh;
         return previous;
     }
+
+    /** Wraps a rejected copy's destination so uploadBatch retires it with the rest. */
+    private LayerData copyAsRetired(StagedCopy copy) {
+        LayerData orphan = new LayerData();
+        orphan.buffer = copy.dstBuffer;
+        orphan.memory = copy.dstMemory;
+        orphan.vertexCount = 0;
+        orphan.bufferSize = copy.bytes;
+        orphan.generation = copy.generation;
+        return orphan;
+    }
+
+    /** Count of stale-generation uploads rejected by {@link #store}; diagnostics only. */
+    public volatile long staleUploadDrops;
 
     /** Drops (but does not destroy) the stored entry for (chunk, layer), returning it (or null). */
     private LayerData clearLayer(Object chunk, int layer) {
@@ -410,7 +478,7 @@ public class VulkanChunkStore {
     private long retireClock;
 
     /** Advances the retirement clock; call once per rendered frame. */
-    public void tickFrame() {
+    public synchronized void tickFrame() {
         retireClock++;
         java.util.Iterator<Retired> it = retired.iterator();
         while (it.hasNext()) {
@@ -488,12 +556,14 @@ public class VulkanChunkStore {
         public final int layer;
         public final ByteBuffer data;
         public final int vertexCount;
+        public final long generation;
 
-        public UploadRequest(Object chunk, int layer, ByteBuffer data, int vertexCount) {
+        public UploadRequest(Object chunk, int layer, ByteBuffer data, int vertexCount, long generation) {
             this.chunk = chunk;
             this.layer = layer;
             this.data = data;
             this.vertexCount = vertexCount;
+            this.generation = generation;
         }
     }
 }
