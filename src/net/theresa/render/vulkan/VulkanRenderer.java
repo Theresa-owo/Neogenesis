@@ -362,9 +362,10 @@ public class VulkanRenderer {
         float farPlane = mc.gameSettings.renderDistanceChunks * 16.0f * 4.0f;
         float aspect = (float) swapchain.width / (float) swapchain.height;
 
-        // Vulkan clip space: depth 0..1, Y points down (flip after building the GL-style matrix)
-        Matrix4f projection = new Matrix4f().perspective((float) Math.toRadians(fovDegrees), aspect, 0.05f,
-                farPlane, true);
+        // Vulkan clip space: Reversed-Z (1.0 at near, 0.0 at far) for near-infinite depth precision
+        // Y points down (flip after building the GL-style matrix)
+        Matrix4f projection = new Matrix4f().perspective((float) Math.toRadians(fovDegrees), aspect, farPlane,
+                0.05f, true);
         projection.mul(new Matrix4f().scale(1.0f, -1.0f, 1.0f));
 
         // mirrors the vanilla modelview orientation, WITHOUT the translate(-eye):
@@ -477,7 +478,21 @@ public class VulkanRenderer {
         ByteBuffer push = stack.malloc(lightmapEnabled ? PUSH_BLOCK_SIZE : 80);
 
         long boundPipeline = 0;
+        // The traversal order of renderInfos changes with the view; under
+        // strict-GREATER coplanar semantics (first draw wins) the winner of
+        // equal-depth pixels must not depend on that order, so sort by chunk
+        // position — fully deterministic, view-independent.
+        visible.sort(java.util.Comparator.comparingInt((RenderChunk c) -> c.getPosition().getX())
+                .thenComparingInt(c -> c.getPosition().getY())
+                .thenComparingInt(c -> c.getPosition().getZ()));
         for (RenderChunk chunk : visible) {
+            // a store entry keyed by a repositioned chunk object belongs to the
+            // object's PREVIOUS position; drawing it would render the old
+            // location's mesh at the new location until the rebuild uploads
+            if (!net.theresa.render.vulkan.VulkanWorldBridge.hasFreshMesh(chunk)) {
+                staleDraws++;
+                continue;
+            }
             long baseX = chunk.getPosition().getX();
             long baseY = chunk.getPosition().getY();
             long baseZ = chunk.getPosition().getZ();
@@ -495,11 +510,6 @@ public class VulkanRenderer {
                     // vertices sample garbage atlas UVs (wrong-tile artifacts)
                     drawRangeSkips++;
                     continue;
-                }
-
-                if (layer == LAYER_SOLID && !net.theresa.render.vulkan.VulkanWorldBridge
-                        .hasFreshMesh(chunk)) {
-                    staleDraws++;
                 }
 
                 if (atlasTexture != null && descriptorSet != 0L && !mode.contains("nodesc")) {
@@ -605,7 +615,8 @@ public class VulkanRenderer {
     private void beginRenderPass(VkCommandBuffer commandBuffer, int imageIndex, MemoryStack stack) {
         VkClearValue.Buffer clearValues = VkClearValue.calloc(2, stack);
         clearValues.get(0).color().float32(stack.floats(0.47f, 0.65f, 1.0f, 1.0f));
-        clearValues.get(1).depthStencil().depth(1.0f);
+        // Reversed-Z: clear depth to 0.0f (furthest distance)
+        clearValues.get(1).depthStencil().depth(0.0f);
 
         VkRenderPassBeginInfo beginRenderPass = VkRenderPassBeginInfo.calloc(stack)
                 .sType(VK10.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO)
@@ -923,11 +934,17 @@ public class VulkanRenderer {
                     .sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO)
                     .rasterizationSamples(VK10.VK_SAMPLE_COUNT_1_BIT);
 
+            // Reversed-Z: closer fragments have larger depth values in [1.0, 0.0].
+            // STRICT GREATER mirrors vanilla GL_LESS semantics for coplanar
+            // geometry (zero-thickness cross plants, overlay quads): the
+            // FIRST draw wins, so the outcome cannot flip when the visible
+            // chunk order shuffles with the view. GEQUAL would let the last
+            // draw overwrite coplanar pixels, bubbling under-layers through.
             VkPipelineDepthStencilStateCreateInfo depthStencil = VkPipelineDepthStencilStateCreateInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO)
                     .depthTestEnable(true)
-                    .depthWriteEnable(!blended)
-                    .depthCompareOp(VK10.VK_COMPARE_OP_LESS_OR_EQUAL);
+                    .depthWriteEnable(true)
+                    .depthCompareOp(VK10.VK_COMPARE_OP_GREATER);
 
             VkPipelineColorBlendAttachmentState.Buffer blendAttachment =
                     VkPipelineColorBlendAttachmentState.calloc(1, stack);
