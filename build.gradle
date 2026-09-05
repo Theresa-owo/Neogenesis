@@ -115,7 +115,11 @@ tasks.register('runClient', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     workingDir = rootDir
     jvmArgs '-Xmx2G', '-Dfile.encoding=UTF-8',
-            "-Dneogenesis.renderer=${project.findProperty('renderer') ?: 'opengl'}"
+            "-Dneogenesis.renderer=${project.findProperty('renderer') ?: 'opengl'}",
+            "-Dneogenesis.joinWorld=${project.findProperty('joinWorld') ?: ''}"
+    if (project.hasProperty('jvmExtra')) {
+        jvmArgs project.property('jvmExtra').toString().split(' ').toList()
+    }
     systemProperties System.properties
     args '--accessToken', '0',
          '--username', 'Theresa',
