@@ -40,6 +40,13 @@ object InputDispatcher {
             val ey = (h - Mouse.getEventY()).toFloat()
             val state = Mouse.getEventButtonState()
             val target = hitTest(screen.root, ex, ey)
+            if (System.getProperty("neogenesis.uiHitDebug") != null && state) {
+                System.out.printf(
+                    "[UiHit] press (%.0f,%.0f) -> %s '%s' bounds=(%.0f,%.0f %.0fx%.0f)%n",
+                    ex, ey, target?.type, target?.text?.take(16),
+                    target?.x ?: -1f, target?.y ?: -1f, target?.width ?: -1f, target?.height ?: -1f
+                )
+            }
             if (state) {
                 pressedNode = target
                 target?.pressed = true

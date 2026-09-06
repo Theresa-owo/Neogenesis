@@ -29,6 +29,12 @@
 
 local M = {}
 
+-- Module-wide drag mutex: only ONE slider may be in a drag at a time.
+-- Without this, dragging one slider and sweeping the cursor across another
+-- starts the second one dragging too (each ticker independently sees
+-- left-button + hover over its own root).
+local activeDrag = nil
+
 M.colors = {
     background = "#FFFFFF",
     surface = "#FFFFFF",      -- content1
@@ -448,10 +454,21 @@ function M.slider(spec)
     spec.__track, spec.__fill, spec.__thumb, spec.__valLabel = track, fill, thumb, valueLabel
     spec.type = "box"
     spec.h = spec.h or M.metrics.controlHeight
-    spec.onClick = function() end -- empty: engine hit-test picks the slider up for hover/press
+    -- forward declarations: the onClick closure below captures THESE locals —
+    -- `local function` after the closure would bind a different variable and
+    -- leave the closure calling nil
+    local apply, setValue, setFromX
+    -- click-to-jump is EVENT-driven here (onClick fires synchronously from the
+    -- input dispatcher with the cursor over the control): a polling ticker can
+    -- miss a synthetic click entirely when down+up land inside one frame.
+    spec.onClick = function()
+        local m = neoui.mouse()
+        local root = nodeOf(spec)
+        if root and inside(root, m.x, m.y) then setFromX(m.x) end
+    end
     spec.children = valueLabel and { track, fill, thumb, valueLabel } or { track, fill, thumb }
 
-    local function apply()
+    function apply()
         local frac = fracOf(spec.value)
         -- keep the spec table in sync too: registered screens re-convert
         -- their tree on every open, and the tables are the initial state
@@ -470,7 +487,7 @@ function M.slider(spec)
         end
     end
 
-    local function setValue(v)
+    function setValue(v)
         if spec.step and spec.step > 0 then
             -- round to the nearest step; the epsilon absorbs float dust from
             -- the division (0.95/0.1 == 9.4999... would round the wrong way)
@@ -490,7 +507,7 @@ function M.slider(spec)
         end
     end
 
-    local function setFromX(mx)
+    function setFromX(mx)
         local tr = nodeOf(track)
         if not tr then return end
         local tw = tr:getWidth()
@@ -501,17 +518,24 @@ function M.slider(spec)
 
     addTicker(function()
         local root = nodeOf(spec)
-        if not root then return end
+        if not root then
+            if activeDrag == spec then activeDrag = nil end
+            return
+        end
         local m = neoui.mouse()
         if m.left then
             if not spec.__drag then
-                -- a press over the control starts a drag. hover is only
-                -- maintained for nodes on the CURRENT screen tree, so it
-                -- doubles as a liveness check for detached (closed-screen)
-                -- nodes: their hover was reset and can never turn true.
-                local th = nodeOf(thumb)
-                if (root:getHover() or (th ~= nil and th:getHover())) and inside(root, m.x, m.y) then
+                -- Drag starts on left-button + cursor inside the control.
+                -- Do NOT gate this on engine hover: a press that teleports the
+                -- cursor (no intermediate move) never fires a cursorPos event,
+                -- so hover stays stale for a frame-set and the drag would
+                -- never start. Node liveness is already handled by nodeOf.
+                if activeDrag ~= nil and activeDrag ~= spec then
+                    return -- another slider owns the drag (mutex)
+                end
+                if inside(root, m.x, m.y) then
                     spec.__drag = true
+                    activeDrag = spec
                     setFromX(m.x) -- click-to-jump
                 end
             else
@@ -519,6 +543,7 @@ function M.slider(spec)
             end
         elseif spec.__drag then
             spec.__drag = false
+            if activeDrag == spec then activeDrag = nil end
             if spec.value ~= spec.__lastEmitted then
                 spec.__lastEmitted = spec.value
                 if spec.onChange then pcall(spec.onChange, spec.value) end
