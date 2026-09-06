@@ -114,6 +114,7 @@ public class VulkanRenderer {
     private long[] imageRenderFinished = new long[0];
     private boolean reloadQueued;
     private boolean prevF9Down;
+    private boolean prevF10Down;
     private boolean prevF8Down;
     private int menuProbeFrames;
     private long menuProbeLast;
@@ -195,6 +196,13 @@ public class VulkanRenderer {
             reloadQueued = true;
         }
         prevF9Down = f9Down;
+
+        // F10 reloads the Lua UI scripts (screens, theme, animations)
+        boolean f10Down = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F10) == GLFW.GLFW_PRESS;
+        if (f10Down && !prevF10Down) {
+            net.theresa.ui.NeoUI.INSTANCE.reloadLua();
+        }
+        prevF10Down = f10Down;
 
         // F8 arms a burst frame dump (raw BGRA files under frameDump/) used to
         // classify flicker offline via inter-frame pixel diffing

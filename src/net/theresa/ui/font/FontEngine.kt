@@ -15,7 +15,9 @@ import java.util.concurrent.ConcurrentHashMap
  * demand), so a fresh page texture only appears when the current one fills.
  * Pages are exposed for descriptor binding and drawing.
  */
-class FontEngine private constructor(private val ctx: VulkanContext, private val font: StbTtfFont) {
+class FontEngine private constructor(private val ctx: VulkanContext, private val regular: StbTtfFont, private val bold: StbTtfFont?) {
+
+    private fun fontFor(bold: Boolean): StbTtfFont = if (bold) this.bold ?: regular else regular
 
     class Glyph(
         val page: Int,
@@ -37,65 +39,66 @@ class FontEngine private constructor(private val ctx: VulkanContext, private val
     private val shelfRowH = ArrayList<Int>()
 
     /** Pixels from line top to the baseline at [sizePx]. */
-    fun ascent(sizePx: Float): Float {
+    fun ascent(sizePx: Float, bold: Boolean = false): Float {
         val m = FloatArray(3)
-        font.verticalMetrics(scaleFor(sizePx), m)
+        fontFor(bold).verticalMetrics(scaleFor(sizePx, bold), m)
         return m[0]
     }
 
-    fun lineHeight(sizePx: Float): Float {
+    fun lineHeight(sizePx: Float, bold: Boolean = false): Float {
         val m = FloatArray(3)
-        font.verticalMetrics(scaleFor(sizePx), m)
+        fontFor(bold).verticalMetrics(scaleFor(sizePx, bold), m)
         return m[0] - m[1] + m[2]
     }
 
-    private fun scaleFor(sizePx: Float): Float = font.scaleForPixelHeight(sizePx)
+    private fun scaleFor(sizePx: Float, bold: Boolean = false): Float = fontFor(bold).scaleForPixelHeight(sizePx)
 
     /** Advance of one codepoint (without kerning) in pixels. */
-    fun advance(cp: Int, sizePx: Float): Float {
+    fun advance(cp: Int, sizePx: Float, bold: Boolean = false): Float {
         val out = FloatArray(2)
-        font.horizontalMetrics(cp, scaleFor(sizePx), out)
+        fontFor(bold).horizontalMetrics(cp, scaleFor(sizePx, bold), out)
         return out[0]
     }
 
-    fun kern(prev: Int, next: Int, sizePx: Float): Float = font.kernAdvance(prev, next, scaleFor(sizePx))
+    fun kern(prev: Int, next: Int, sizePx: Float, bold: Boolean = false): Float = fontFor(bold).kernAdvance(prev, next, scaleFor(sizePx, bold))
 
     /** Measured width of a possibly §-coded single-line string, in pixels. */
-    fun measure(text: String, sizePx: Float): Float {
+    fun measure(text: String, sizePx: Float, bold: Boolean = false, letterSpacing: Float = 0f): Float {
         val sizeI = sizePx.toInt().coerceAtLeast(1)
         var width = 0f
         var prev = -1
         for ((seg, _) in parseColorCodes(text, 0xFF000000.toInt())) {
             for (ch in seg) {
                 val cp = ch.code
-                if (prev >= 0) width += kern(prev, cp, sizeI.toFloat())
-                width += advance(cp, sizeI.toFloat())
+                if (prev >= 0) width += kern(prev, cp, sizeI.toFloat(), bold)
+                width += advance(cp, sizeI.toFloat(), bold) + letterSpacing
                 prev = cp
             }
         }
         return width
     }
 
-    fun hasGlyph(cp: Int): Boolean = font.glyphIndex(cp) != 0
+    fun hasGlyph(cp: Int, bold: Boolean = false): Boolean = fontFor(bold).glyphIndex(cp) != 0
 
     /** Page count (for descriptor allocation bounds). */
     fun pageCount(): Int = pages.size
 
     fun pageTexture(page: Int): UiTexture2D = pages[page]
 
-    fun getGlyph(codepoint: Int, sizePx: Float): Glyph {
+    fun getGlyph(codepoint: Int, sizePx: Float, bold: Boolean = false): Glyph {
         val sizeI = sizePx.toInt().coerceAtLeast(1)
-        val key = (sizeI.toLong() shl 32) or (codepoint.toLong() and 0xFFFFFFFFL)
-        return cache[key] ?: bake(codepoint, sizeI, key)
+        val key = (sizeI.toLong() shl 33) or ((if (bold) 1L else 0L) shl 32) or (codepoint.toLong() and 0xFFFFFFFFL)
+        return cache[key] ?: bake(codepoint, sizeI, key, bold)
     }
 
     @Synchronized
-    private fun bake(codepoint: Int, sizeI: Int, key: Long): Glyph {
+    private fun bake(codepoint: Int, sizeI: Int, key: Long, bold: Boolean): Glyph {
         cache[key]?.let { return it }
-        val scale = font.scaleForPixelHeight(sizeI.toFloat())
+        val f = fontFor(bold)
+        val scale = f.scaleForPixelHeight(sizeI.toFloat())
         val advance = FloatArray(2)
-        font.horizontalMetrics(codepoint, scale, advance)
-        val bitmap = font.bakeBitmap(codepoint, scale, sizeI.toFloat())
+        f.horizontalMetrics(codepoint, scale, advance)
+        val bitmap = f.bakeBitmap(codepoint, scale, sizeI.toFloat())
 
         val glyph: Glyph
         if (bitmap == null) {
@@ -233,6 +236,6 @@ class FontEngine private constructor(private val ctx: VulkanContext, private val
             return segments
         }
 
-        fun create(ctx: VulkanContext): FontEngine = FontEngine(ctx, StbTtfFont.loadDefault())
+        fun create(ctx: VulkanContext): FontEngine = FontEngine(ctx, StbTtfFont.loadDefault(), StbTtfFont.loadBold())
     }
 }

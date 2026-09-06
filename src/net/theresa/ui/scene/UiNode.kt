@@ -56,13 +56,16 @@ open class UiNode(var type: String) {
     var text = ""
     var textColor = 0xFFFFFFFF.toInt()
     var textSize = 17f
-    var textShadow = true
+    var textShadow = false
 
     // ---- interaction (runtime state) ----
     var onClick: (() -> Unit)? = null
     var hover = false
     var pressed = false
-    var hoverT = 0f                     // animated 0..1 (M4)
+    var hoverT = 0f                     // animated 0..1 (hover state layer)
+    var pressedT = 0f                   // animated 0..1 (press scale)
+    var bold = false
+    var letterSpacing = 0f              // extra px advance per glyph
 
     fun add(child: UiNode): UiNode {
         child.parent = this
@@ -72,15 +75,19 @@ open class UiNode(var type: String) {
 
     // ---- layout ----
 
-    /** Resolves the node's px size inside [parentW]x[parentH] px. */
+    /** Resolves the node's px size. MATCH fills the parent's CONTENT box
+     *  (parent bounds minus the parent's own padding). */
     private fun resolveSize(scale: Float, parentW: Float, parentH: Float, theme: Theme) {
+        val p = parent
+        val availW = if (p != null) p.width - 2 * p.padding * scale else parentW
+        val availH = if (p != null) p.height - 2 * p.padding * scale else parentH
         width = when (widthMode) {
-            SIZE_MATCH -> parentW - 2 * padding * scale
+            SIZE_MATCH -> availW
             SIZE_WRAP -> -1f
             else -> dpWidth * scale
         }
         height = when (heightMode) {
-            SIZE_MATCH -> parentH - 2 * padding * scale
+            SIZE_MATCH -> availH
             SIZE_WRAP -> -1f
             else -> dpHeight * scale
         }
@@ -126,15 +133,14 @@ open class UiNode(var type: String) {
             sumW += c.width + spacing * scale
         }
         if (width < 0) width = when (type) {
-            "column" -> maxW
             "row" -> sumW - spacing * scale
             else -> maxW
-        }
+        } + padding * 2 * scale
         if (height < 0) height = when (type) {
             "column" -> sumH - spacing * scale
             "row" -> maxH
             else -> maxH
-        }
+        } + padding * 2 * scale
     }
 
     /** Speculative layout used by wrap-content measurement. */

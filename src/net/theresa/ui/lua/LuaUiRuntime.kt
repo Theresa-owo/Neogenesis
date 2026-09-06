@@ -205,12 +205,15 @@ class LuaUiRuntime {
         node.shadow = t.get("shadow").optboolean(node.shadow)
         node.visible = t.get("visible").optboolean(node.visible)
         node.text = t.get("text").optjstring(node.text)
+        if (node.type == "button") node.textSize = NeoUI.theme.fontSize
         node.textSize = t.get("textSize").optdouble(node.textSize.toDouble()).toFloat()
         t.get("textColor")?.let { node.textColor = colorOf(it) }
         t.get("fillColor")?.let { node.fillColor = colorOf(it) }
         t.get("fillEndColor")?.let { node.fillEndColor = colorOf(it) }
         t.get("borderColor")?.let { node.borderColor = colorOf(it) }
         if (t.get("hoverT") != null) node.hoverT = t.get("hoverT").optdouble(node.hoverT.toDouble()).toFloat()
+        node.bold = t.get("bold").optboolean(node.bold)
+        node.letterSpacing = t.get("letterSpacing").optdouble(node.letterSpacing.toDouble()).toFloat()
         val onClick = t.get("onClick")
         if (onClick.isfunction()) {
             val fn = onClick.checkfunction()
@@ -310,10 +313,12 @@ class LuaUiRuntime {
 
             function M.label(spec)
                 spec.type = "label"
-                spec.textSize = spec.textSize or 16
+                spec.textSize = spec.textSize or 18
                 spec.textColor = spec.textColor or M.colors.foreground
                 spec.w = spec.w or "match"
+                spec.bold = spec.bold or true
                 spec.shadow = false
+                spec.textShadow = false
                 return spec
             end
 
@@ -326,6 +331,8 @@ class LuaUiRuntime {
                 spec.w = spec.w or M.metrics.buttonWidth
                 spec.radius = spec.radius or M.radius.medium
                 spec.shadow = false
+                spec.textShadow = false
+                spec.bold = spec.bold or true
                 if v == "solid" then
                     spec.fillColor = c.primary; spec.fillEndColor = c.primary
                     spec.textColor = c.primaryForeground
@@ -349,6 +356,7 @@ class LuaUiRuntime {
                 spec.style = "glass"
                 spec.radius = spec.radius or M.radius.card
                 spec.shadow = false
+                spec.textShadow = false
                 spec.padding = spec.padding or 28
                 return spec
             end
@@ -378,11 +386,11 @@ class LuaUiRuntime {
                     return node
                 end
 
-                add(heroui.label { text = "NEOGENESIS", textSize = 44 })
-                add(heroui.label { text = "Vulkan Native UI", textSize = 16,
+                add(heroui.label { text = "NEOGENESIS", textSize = 50, bold = true, letterSpacing = 2 })
+                add(heroui.label { text = "Vulkan Native UI", textSize = 18,
                                    textColor = heroui.colors.foregroundMuted })
                 local bar = add(heroui.accent_bar())
-                add(heroui.spacer(14))
+                add(heroui.spacer(16))
                 add(heroui.button { text = neoui.i18n("menu.singleplayer"), variant = "solid",
                                     onClick = function() neoui.open("singleplayer") end })
                 add(heroui.button { text = neoui.i18n("menu.multiplayer"), variant = "bordered",
@@ -398,15 +406,13 @@ class LuaUiRuntime {
                                     onClick = function() neoui.handle("quit") end })
 
                 local tree = { type = "box", children = {} }
-                table.insert(tree.children, heroui.card { w = 480,
+                table.insert(tree.children, heroui.card { w = 640, padding = 36,
                     anchor = {0.5, 0.5}, pivot = {0.5, 0.5}, children = { column } })
-                table.insert(tree.children, heroui.label { text = "Neogenesis 1.8.9 Vulkan",
-                    textSize = 13, textColor = "#FF55555C",
-                    anchor = {0, 1}, pivot = {0, 1}, offset = {16, -14} })
+                -- single merged footer, bottom-center; no Mojang attribution
                 table.insert(tree.children, heroui.label {
-                    text = "Copyright Mojang AB. Do not distribute!",
-                    textSize = 13, textColor = "#FF55555C",
-                    anchor = {1, 1}, pivot = {1, 1}, offset = {-16, -14} })
+                    text = "Neogenesis 1.8.9 Vulkan",
+                    textSize = 14, textColor = "#FF55555C",
+                    anchor = {0.5, 1}, pivot = {0.5, 1}, offset = {0, -12} })
 
                 neoui.show_screen { id = "main_menu", tree = tree }
 

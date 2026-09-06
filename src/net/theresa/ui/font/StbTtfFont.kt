@@ -99,13 +99,30 @@ class StbTtfFont(val data: ByteBuffer, name: String) {
          * never bundled in the repo; mods can ship their own under
          * assets/&lt;ns&gt;/ui/fonts/.
          */
-        fun loadDefault(): StbTtfFont {
-            val candidates = listOf(
+        fun loadDefault(): StbTtfFont = load(
+            listOf(
                 "C:/Windows/Fonts/msyh.ttc" to "Microsoft YaHei",
                 "C:/Windows/Fonts/msyhl.ttc" to "Microsoft YaHei Light",
                 "C:/Windows/Fonts/simhei.ttf" to "SimHei",
                 "C:/Windows/Fonts/arial.ttf" to "Arial",
             )
+        )
+
+        /** Bold weight for the same families; null when nothing loads. */
+        fun loadBold(): StbTtfFont? = try {
+            load(
+                listOf(
+                    "C:/Windows/Fonts/msyhbd.ttc" to "Microsoft YaHei Bold",
+                    "C:/Windows/Fonts/simhei.ttf" to "SimHei",
+                    "C:/Windows/Fonts/arialbd.ttf" to "Arial Bold",
+                )
+            )
+        } catch (t: Throwable) {
+            System.err.println("[NeoUI] bold font unavailable, bold renders regular: $t")
+            null
+        }
+
+        private fun load(candidates: List<Pair<String, String>>): StbTtfFont {
             for ((path, name) in candidates) {
                 val file = File(path)
                 if (!file.exists()) continue

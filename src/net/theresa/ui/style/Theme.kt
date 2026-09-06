@@ -24,7 +24,7 @@ data class Theme(
     val shadow: Long = 0x52000000,
     val radius: Float = 28f,                 // MD3 extra-large shape
     val baseScale: Float = 1f,
-    val fontSize: Float = 20f,
+    val fontSize: Float = 22f,
     val entranceMs: Long = 280,
     val hoverMs: Long = 120,
 ) {

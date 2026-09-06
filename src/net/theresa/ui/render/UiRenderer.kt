@@ -542,14 +542,17 @@ class UiRenderer(
         fun surfaceQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode, mode: Float) {
             curSurface = startOrContinue(surfaceBatches, curSurface, 0)
             val lift = node.hoverT * 3f
+            // press feedback: the surface shrinks 2% around its center
+            val pressScale = 1f - node.pressedT * 0.02f
+            val qw = w * pressScale; val qh = h * pressScale
             val fill = stateLayer(node.fillColor, node)
             val fillEnd = stateLayer(node.fillEndColor, node)
-            val x0 = x; val y0 = y - lift + entranceLift
-            val x1 = x0 + w; val y1 = y0 + h
-            fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, fill, w, h, node.radius, mode, fillEnd, node.borderColor)
+            val x0 = x + (w - qw) / 2; val y0 = y + (h - qh) / 2 - lift + entranceLift
+            val x1 = x0 + qw; val y1 = y0 + qh
+            fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, fill, qw, qh, node.radius * pressScale, mode, fillEnd, node.borderColor)
             // fills: local pixel coords (uv), gradient t = uv.y / h
-            v(x0, y0, 0f, 0f); v(x0, y1, 0f, h); v(x1, y1, w, h)
-            v(x0, y0, 0f, 0f); v(x1, y1, w, h); v(x1, y0, w, 0f)
+            v(x0, y0, 0f, 0f); v(x0, y1, 0f, qh); v(x1, y1, qw, qh)
+            v(x0, y0, 0f, 0f); v(x1, y1, qw, qh); v(x1, y0, qw, 0f)
             curSurface!!.quads++
         }
 
@@ -564,14 +567,15 @@ class UiRenderer(
             curSurface!!.quads++
         }
 
-        fun textRun(text: String, startX: Float, baseline: Float, sizeI: Int, defaultColor: Int, isShadow: Boolean) {
+        fun textRun(text: String, startX: Float, baseline: Float, sizeI: Int, defaultColor: Int,
+                    isShadow: Boolean, bold: Boolean, letterSpacing: Float) {
             var penX = startX
             var prev = -1
             for ((seg, argb) in FontEngine.parseColorCodes(text, defaultColor)) {
                 for (ch in seg) {
                     val cp = ch.code
-                    val g = font.getGlyph(cp, sizeI.toFloat())
-                    if (prev >= 0) penX += font.kern(prev, cp, sizeI.toFloat())
+                    val g = font.getGlyph(cp, sizeI.toFloat(), bold)
+                    if (prev >= 0) penX += font.kern(prev, cp, sizeI.toFloat(), bold)
                     if (g.page >= 0 && g.width > 0) {
                         curText = startOrContinue(textBatches, curText, g.page)
                         val x0 = penX + g.xoff
@@ -583,7 +587,7 @@ class UiRenderer(
                         v(x0, y0, g.u0, g.v0); v(x1, y1, g.u1, g.v1); v(x1, y0, g.u1, g.v0)
                         curText!!.quads++
                     }
-                    penX += g.advance
+                    penX += g.advance + letterSpacing
                     prev = cp
                 }
             }
@@ -598,17 +602,18 @@ class UiRenderer(
             }
             if (node.text.isNotEmpty()) {
                 val sizeI = (node.textSize * dp).toInt().coerceAtLeast(1)
-                val ascent = font.ascent(sizeI.toFloat())
-                val desc = font.lineHeight(sizeI.toFloat()) - ascent
+                val spacingPx = node.letterSpacing * dp
+                val ascent = font.ascent(sizeI.toFloat(), node.bold)
+                val desc = font.lineHeight(sizeI.toFloat(), node.bold) - ascent
                 val baseline = node.y + (node.height - (ascent + desc)) / 2 + ascent
-                val measured = font.measure(node.text, sizeI.toFloat())
+                val measured = font.measure(node.text, sizeI.toFloat(), node.bold, spacingPx)
                 val startX = node.x + (node.width - measured) / 2
                 val shadowOff = 1.2f
                 if (node.textShadow) {
                     val shArgb = (0x80 shl 24) or (((node.textColor and 0x00FFFFFF) shr 2) and 0x00FFFFFF)
-                    textRun(node.text, startX + shadowOff, baseline + shadowOff, sizeI, shArgb, true)
+                    textRun(node.text, startX + shadowOff, baseline + shadowOff, sizeI, shArgb, true, node.bold, spacingPx)
                 }
-                textRun(node.text, startX, baseline, sizeI, node.textColor, false)
+                textRun(node.text, startX, baseline, sizeI, node.textColor, false, node.bold, spacingPx)
             }
             for (c in node.children) renderNode(c)
         }

@@ -102,13 +102,16 @@ object NeoUI {
             }
         }
         screen?.tickAnimations(now, theme.entranceMs)
-        // hover state-layer tween: frame-rate independent exponential smoothing
-        // (~45ms time constant) so the animation looks identical at any fps
+        // hover/press state tweens: frame-rate independent exponential smoothing
+        // (~45ms time constant) so animations look identical at any fps
         val k = 1f - Math.exp(-dtMs / 45.0).toFloat()
         screen?.root?.walk { n ->
             val target = if (n.hover) 1f else 0f
             n.hoverT += (target - n.hoverT) * k
             if (kotlin.math.abs(n.hoverT - target) < 0.005f) n.hoverT = target
+            val pTarget = if (n.pressed) 1f else 0f
+            n.pressedT += (pTarget - n.pressedT) * k
+            if (kotlin.math.abs(n.pressedT - pTarget) < 0.005f) n.pressedT = pTarget
         }
         luaRuntime?.tickFrame(dtMs / 1000f)
     }
@@ -121,6 +124,24 @@ object NeoUI {
     /** Per-frame fps probe (prints menu render fps every 240 frames). */
     fun probeFrame() {
         renderer?.probeFrame()
+    }
+
+    /** F10: restart the Lua runtime and reload every screen from lua/. */
+    fun reloadLua() {
+        try {
+            val width = Minecraft.getMinecraft().displayWidth
+            val height = Minecraft.getMinecraft().displayHeight
+            luaRuntime?.destroy()
+            luaRuntime = null
+            LuaUiRuntime().let {
+                it.start()
+                luaRuntime = it
+            }
+            System.out.println("[NeoUI] Lua scripts reloaded ($width x $height)")
+        } catch (t: Throwable) {
+            System.err.println("[NeoUI] Lua reload failed: $t")
+            t.printStackTrace()
+        }
     }
 
     private var luaRuntime: LuaUiRuntime? = null

@@ -25,10 +25,12 @@ M.metrics = { buttonHeight = 44, buttonWidth = 400 }
 
 function M.label(spec)
     spec.type = "label"
-    spec.textSize = spec.textSize or 16
+    spec.textSize = spec.textSize or 18
     spec.textColor = spec.textColor or M.colors.foreground
     spec.w = spec.w or "match"
+    spec.bold = spec.bold or true
     spec.shadow = false
+    spec.textShadow = false
     return spec
 end
 
@@ -41,6 +43,8 @@ function M.button(spec)
     spec.w = spec.w or M.metrics.buttonWidth
     spec.radius = spec.radius or M.radius.medium
     spec.shadow = false
+    spec.textShadow = false
+    spec.bold = spec.bold or true
     if v == "solid" then
         spec.fillColor = c.primary; spec.fillEndColor = c.primary
         spec.textColor = c.primaryForeground
@@ -64,6 +68,7 @@ function M.card(spec)
     spec.style = "glass"
     spec.radius = spec.radius or M.radius.card
     spec.shadow = false
+    spec.textShadow = false
     spec.padding = spec.padding or 28
     return spec
 end
