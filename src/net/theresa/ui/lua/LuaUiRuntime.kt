@@ -265,7 +265,7 @@ class LuaUiRuntime {
         val dir: Path = Paths.get("lua", "heroui")
         Files.createDirectories(dir)
         writeIfMissing(Paths.get("lua", "init.lua"), EMBED_INIT)
-        writeIfMissing(Paths.get("lua", "heroui", "theme.lua"), EMBED_THEME)
+        writeIfMissing(Paths.get("lua", "heroui.lua"), EMBED_HEROUI)
         writeIfMissing(Paths.get("lua", "main_menu.lua"), EMBED_MAIN_MENU)
     }
 
@@ -282,43 +282,49 @@ class LuaUiRuntime {
             main_menu.register()
         """.trimIndent() + "\n"
 
-        private val EMBED_THEME = """
-            -- HeroUI-style dark theme tokens (https://heroui.com)
+        private val EMBED_HEROUI = """
+            -- HeroUI for NeoUI (https://heroui.com): design tokens + components.
+            -- Every component takes a spec table and returns a completed node
+            -- table for neoui.show_screen.
+
             local M = {}
+
             M.colors = {
-                background = "#000000",
-                surface = "#18181B",      -- content1
-                surface2 = "#27272A",     -- content2
-                surface3 = "#3F3F46",     -- content3
+                background = "#FFFFFF",
+                surface = "#FFFFFF",      -- content1
+                surface2 = "#F4F4F5",     -- content2
+                surface3 = "#E4E4E7",     -- content3
                 foreground = "#1F2126",
                 foregroundMuted = "#6E7078",
                 primary = "#006FEE",
                 primaryHover = "#005CC4",
+                primaryTint = "#1A006FEE",
                 primaryForeground = "#FFFFFF",
                 secondary = "#9353F3",
                 danger = "#F31260",
-                divider = "#26FFFFFF",
-                glass = "#B3141218",
-                glassBorder = "#24FFFFFF",
-                shadow = "#52000000",
+                divider = "#14000000",
             }
-            M.radius = { small = 12, medium = 14, large = 16 }
-            M.button = { height = 44, width = 400 }
-            return M
-        """.trimIndent() + "\n"
 
-        private val EMBED_MAIN_MENU = """
-            local heroui = require("heroui.theme")
+            M.radius = { small = 12, medium = 14, large = 16, card = 20 }
+            M.metrics = { buttonHeight = 44, buttonWidth = 400 }
 
-            local M = {}
+            function M.label(spec)
+                spec.type = "label"
+                spec.textSize = spec.textSize or 16
+                spec.textColor = spec.textColor or M.colors.foreground
+                spec.w = spec.w or "match"
+                spec.shadow = false
+                return spec
+            end
 
-            -- HeroUI button: variants solid | bordered | flat | light
-            local function button(spec)
+            -- variants: solid | bordered | flat | light (HeroUI button styles)
+            function M.button(spec)
                 local v = spec.variant or "solid"
-                local c = heroui.colors
+                local c = M.colors
                 spec.type = "button"
-                spec.h = spec.h or heroui.button.height
-                spec.radius = heroui.radius.medium
+                spec.h = spec.h or M.metrics.buttonHeight
+                spec.w = spec.w or M.metrics.buttonWidth
+                spec.radius = spec.radius or M.radius.medium
                 spec.shadow = false
                 if v == "solid" then
                     spec.fillColor = c.primary; spec.fillEndColor = c.primary
@@ -327,7 +333,7 @@ class LuaUiRuntime {
                     spec.fillColor = "#00000000"; spec.fillEndColor = "#00000000"
                     spec.textColor = c.primary; spec.borderColor = c.primary
                 elseif v == "flat" then
-                    spec.fillColor = "#26006FEE"; spec.fillEndColor = "#26006FEE"
+                    spec.fillColor = c.primaryTint; spec.fillEndColor = c.primaryTint
                     spec.textColor = c.primary
                 else -- light
                     spec.fillColor = "#00000000"; spec.fillEndColor = "#00000000"
@@ -336,48 +342,68 @@ class LuaUiRuntime {
                 return spec
             end
 
-            function M.register()
-                local c = heroui.colors
+            -- frosted glass surface container (no drop shadow: the blur IS the
+            -- separation — a dark ring over the blurred backdrop reads as dirt)
+            function M.card(spec)
+                spec.type = "panel"
+                spec.style = "glass"
+                spec.radius = spec.radius or M.radius.card
+                spec.shadow = false
+                spec.padding = spec.padding or 28
+                return spec
+            end
 
-                -- built programmatically: no brace soup, easy to extend
-                local column = { type = "column", spacing = 12, w = "match", children = {} }
+            function M.column(spec) spec.type = "column"; spec.spacing = spec.spacing or 12; spec.w = spec.w or "match"; return spec end
+            function M.row(spec) spec.type = "row"; spec.spacing = spec.spacing or 8; return spec end
+            function M.spacer(h) return { type = "spacer", h = h } end
+
+            function M.accent_bar(w)
+                return { type = "panel", w = w or 64, h = 4, radius = 2,
+                         fillColor = M.colors.primary, fillEndColor = M.colors.primary,
+                         borderColor = "#00000000", shadow = false }
+            end
+
+            return M
+        """.trimIndent() + "\n"
+
+        private val EMBED_MAIN_MENU = """
+            local heroui = require("heroui")
+
+            local M = {}
+
+            function M.register()
+                local column = heroui.column { children = {} }
                 local function add(node)
                     table.insert(column.children, node)
                     return node
                 end
 
-                add { type = "label", text = "NEOGENESIS", textSize = 44, textColor = c.foreground, w = "match" }
-                add { type = "label", text = "Vulkan Native UI", textSize = 16,
-                      textColor = c.foregroundMuted, w = "match" }
-                local bar = add { type = "panel", w = 64, h = 4, radius = 2,
-                                  fillColor = c.primary, fillEndColor = c.primary,
-                                  borderColor = "#00000000", shadow = false }
-                add { type = "spacer", h = 12 }
-                add(button { text = neoui.i18n("menu.singleplayer"), variant = "solid",
-                             onClick = function() neoui.open("singleplayer") end })
-                add(button { text = neoui.i18n("menu.multiplayer"), variant = "bordered",
-                             onClick = function() neoui.open("multiplayer") end })
-                local row = { type = "row", spacing = 8, w = 400, children = {} }
-                table.insert(row.children, button {
-                    text = neoui.i18n("menu.options"), variant = "flat", w = 196,
-                    onClick = function() neoui.open("options") end })
-                table.insert(row.children, button {
-                    text = neoui.i18n("options.language"), variant = "flat", w = 196,
-                    onClick = function() neoui.open("language") end })
+                add(heroui.label { text = "NEOGENESIS", textSize = 44 })
+                add(heroui.label { text = "Vulkan Native UI", textSize = 16,
+                                   textColor = heroui.colors.foregroundMuted })
+                local bar = add(heroui.accent_bar())
+                add(heroui.spacer(14))
+                add(heroui.button { text = neoui.i18n("menu.singleplayer"), variant = "solid",
+                                    onClick = function() neoui.open("singleplayer") end })
+                add(heroui.button { text = neoui.i18n("menu.multiplayer"), variant = "bordered",
+                                    onClick = function() neoui.open("multiplayer") end })
+                local row = heroui.row { w = 400, children = {
+                    heroui.button { text = neoui.i18n("menu.options"), variant = "bordered", w = 196,
+                                    onClick = function() neoui.open("options") end },
+                    heroui.button { text = neoui.i18n("options.language"), variant = "bordered", w = 196,
+                                    onClick = function() neoui.open("language") end } } }
                 add(row)
-                add(button { text = neoui.i18n("menu.quit"), variant = "light",
-                             textColor = c.danger,
-                             onClick = function() neoui.handle("quit") end })
+                add(heroui.button { text = neoui.i18n("menu.quit"), variant = "light",
+                                    textColor = heroui.colors.danger,
+                                    onClick = function() neoui.handle("quit") end })
 
                 local tree = { type = "box", children = {} }
-                table.insert(tree.children, {
-                    type = "panel", style = "glass", w = 480,
-                    anchor = {0.5, 0.5}, pivot = {0.5, 0.5}, padding = 28,
-                    children = { column } })
-                table.insert(tree.children, { type = "label", text = "Neogenesis 1.8.9 Vulkan",
+                table.insert(tree.children, heroui.card { w = 480,
+                    anchor = {0.5, 0.5}, pivot = {0.5, 0.5}, children = { column } })
+                table.insert(tree.children, heroui.label { text = "Neogenesis 1.8.9 Vulkan",
                     textSize = 13, textColor = "#FF55555C",
                     anchor = {0, 1}, pivot = {0, 1}, offset = {16, -14} })
-                table.insert(tree.children, { type = "label",
+                table.insert(tree.children, heroui.label {
                     text = "Copyright Mojang AB. Do not distribute!",
                     textSize = 13, textColor = "#FF55555C",
                     anchor = {1, 1}, pivot = {1, 1}, offset = {-16, -14} })

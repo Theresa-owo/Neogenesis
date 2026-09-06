@@ -410,9 +410,10 @@ class UiRenderer(
             vkCmdDraw(cmd, 3, 1, 0, 0)
             vkCmdEndRenderPass(cmd)
 
-            // Passes 2-7: three H/V gaussian iterations — an isotropic wash
-            // strong enough to erase the source's blocky features entirely.
-            for (iteration in 0 until 3) {
+            // Passes 2-9: four H/V gaussian iterations — narrow taps, repeated,
+            // approximate a wide smooth gaussian (kills residual square grain
+            // from the low-res backdrop far better than a few wide taps)
+            for (iteration in 0 until 4) {
                 chain.beginPass(cmd, rt1)
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline)
                 vkCmdBindDescriptorSets(
@@ -722,7 +723,7 @@ class UiRenderer(
 
     companion object {
         /** Gaussian spread in source texels per tap step. */
-        const val BLUR_SPREAD = 3.0f
+        const val BLUR_SPREAD = 2.2f
 
         /** pos2f + uv2f + tint4ub + rect4f + gradEnd4ub + border4ub. */
         const val SURFACE_STRIDE = 44
