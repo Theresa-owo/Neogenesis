@@ -18,6 +18,10 @@ object InputDispatcher {
     private var pressedNode: UiNode? = null
     private var hoveredNode: UiNode? = null
 
+    /** Lua text fields set this to swallow ESC/keys while editing. */
+    @Volatile
+    var popSuppressed: Boolean = false
+
     fun tick(screen: NeoScreen) {
         val mc = Minecraft.getMinecraft()
         val w = mc.displayWidth
@@ -50,8 +54,15 @@ object InputDispatcher {
         }
 
         while (Keyboard.next()) {
-            if (!Keyboard.getEventKeyState()) continue
-            if (Keyboard.getEventKey() == 1) { // ESC
+            val key = Keyboard.getEventKey()
+            val ch = Keyboard.getEventCharacter()
+            val down = Keyboard.getEventKeyState()
+            // Lua text fields observe every key event (may consume)
+            try {
+                net.theresa.ui.NeoUI.dispatchLuaKey(key, ch, down)
+            } catch (_: Throwable) {
+            }
+            if (down && key == 1 && !popSuppressed) { // ESC
                 ScreenManager.pop()
             }
         }

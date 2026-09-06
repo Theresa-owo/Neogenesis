@@ -3,6 +3,7 @@ package net.theresa.ui.lua
 import net.theresa.ui.NeoUI
 import net.theresa.ui.scene.UiNode
 import net.theresa.ui.screen.NeoScreen
+import libsrc.lwjglx.input.Mouse
 import net.theresa.ui.screen.ScreenManager
 import org.luaj.vm2.Globals
 import org.luaj.vm2.LuaTable
@@ -39,12 +40,25 @@ class LuaUiRuntime {
     private val globals: Globals = JsePlatform.standardGlobals()
     private val frameHooks = ArrayList<LuaValue>()
     private val registeredScreens = HashMap<String, LuaTable>()
+    var keyListener: LuaValue? = null
     private var startTime = System.nanoTime()
+
+    fun dispatchKey(key: Int, ch: Char, down: Boolean) {
+        keyListener?.let {
+            try {
+                it.call(LuaValue.valueOf(key), LuaValue.valueOf(ch.toString()), LuaValue.valueOf(down))
+            } catch (t: Throwable) {
+                System.err.println("[NeoUI lua] key_listener failed: $t")
+            }
+        }
+    }
     private var dbgCount = 0
 
     fun start() {
         writeEmbeddedScripts()
         globals.set("neoui", coerceApi())
+        globals.set("neoui", globals.get("neoui"))
+        LuaApiRegistry.installAll(globals, this)
         val chunk = globals.load(Files.readString(Paths.get("lua", "init.lua")), "init")
         chunk.call()
     }
@@ -121,6 +135,36 @@ class LuaUiRuntime {
                 return LuaValue.NIL
             }
         })
+        // cursor state for Lua-side drag/slider components
+        api.set("mouse", object : VarArgFunction() {
+            override fun invoke(args: Varargs): LuaValue {
+                val mc = net.minecraft.client.Minecraft.getMinecraft()
+                val mx = libsrc.lwjglx.input.Mouse.getX().toFloat()
+                val my = (mc.displayHeight - libsrc.lwjglx.input.Mouse.getY()).toFloat()
+                val t = LuaTable()
+                t.set("x", LuaValue.valueOf(mx.toDouble()))
+                t.set("y", LuaValue.valueOf(my.toDouble()))
+                t.set("left", LuaValue.valueOf(libsrc.lwjglx.input.Mouse.isButtonDown(0)))
+                t.set("right", LuaValue.valueOf(libsrc.lwjglx.input.Mouse.isButtonDown(1)))
+                t.set("wheel", LuaValue.valueOf(libsrc.lwjglx.input.Mouse.getDWheel().toDouble()))
+                return t
+            }
+        })
+        // raw keyboard events for text fields (consumed BEFORE InputDispatcher's
+        // ESC handling? no — dispatched after; ESC still pops screens)
+        api.set("key_listener", object : VarArgFunction() {
+            override fun invoke(args: Varargs): LuaValue {
+                keyListener = args.arg1().checkfunction()
+                return LuaValue.NIL
+            }
+        })
+        // text fields suppress ESC-pops-while-editing
+        api.set("set_pop_suppressed", object : VarArgFunction() {
+            override fun invoke(args: Varargs): LuaValue {
+                net.theresa.ui.screen.InputDispatcher.popSuppressed = args.arg1().toboolean()
+                return LuaValue.NIL
+            }
+        })
         api.set("handle", object : VarArgFunction() {
             override fun invoke(args: Varargs): LuaValue {
                 NeoUI.handleAction(args.arg1().tojstring())
@@ -149,7 +193,7 @@ class LuaUiRuntime {
     // LuaTable -> UiNode
     // ------------------------------------------------------------------
 
-    private fun nodeFromLua(t: LuaValue): UiNode {
+    fun nodeFromLua(t: LuaValue): UiNode {
         val typeName = t.get("type").optjstring("box")
         val node = when (typeName) {
             "label" -> net.theresa.ui.scene.Widgets.label("")

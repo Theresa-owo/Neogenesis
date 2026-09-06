@@ -469,7 +469,12 @@ class UiRenderer(
                     renderScreenTree(cmd, stack, width, height, screen)
                 }
             }
-            // HUD screens (in-world) are appended here (phase 2).
+            // HUD screens (in-world) over the terrain
+            if (!menuContext) {
+                net.theresa.ui.hud.HudRenderer.screen?.let {
+                    renderScreenTree(cmd, stack, width, height, it)
+                }
+            }
         }
     }
 

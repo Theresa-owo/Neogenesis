@@ -185,6 +185,10 @@ object NeoUI {
         System.out.println("[NeoUI] custom action: $event")
     }
 
+    fun dispatchLuaKey(key: Int, ch: Char, down: Boolean) {
+        luaRuntime?.dispatchKey(key, ch, down)
+    }
+
     private fun menuContext(): Boolean {
         val mc = Minecraft.getMinecraft() ?: return true
         return mc.theWorld == null
