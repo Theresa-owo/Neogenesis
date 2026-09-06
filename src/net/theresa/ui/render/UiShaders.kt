@@ -185,10 +185,13 @@ object UiShaders {
             }
 
             if (mode < 2.5) {
-                // Frosted glass: blurred backdrop in screen space, tinted, film grain.
+                // Aero/frosted glass: the blurred backdrop shows through a navy
+                // tint overlay (bg luminance preserved), plus film grain.
                 vec3 bg = texture(backdrop, vScreenUv).rgb;
-                float n = (hashNoise(floor(gl_FragCoord.xy)) - 0.5) * 0.028;
-                vec3 c = bg * vTint.rgb * 2.15 + n;
+                float n = (hashNoise(floor(gl_FragCoord.xy)) - 0.5) * 0.022;
+                vec3 c = bg * 0.9 + vec3(0.015);
+                c = mix(c, vTint.rgb * 1.6, 0.55);
+                c += n;
                 float aa = 1.0 - smoothstep(-0.75, 0.75, d);
                 float borderA = (1.0 - smoothstep(0.55, 1.45, abs(d + 1.0))) * vBorder.a;
                 c = mix(c, vBorder.rgb, borderA);

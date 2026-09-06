@@ -1,0 +1,28 @@
+{
+  "type": "box",
+  "children": [
+    {
+      "type": "panel", "w": 460, "anchor": [0.5, 0.5], "pivot": [0.5, 0.5], "padding": 24,
+      "children": [
+        {
+          "type": "column", "spacing": 10, "w": "match",
+          "children": [
+            { "type": "label", "text": "§bNEOGENESIS", "textSize": 38, "w": "match" },
+            { "type": "label", "text": "§8Vulkan Native UI", "textSize": 15, "textColor": "#FF9AA0A8", "w": "match" },
+            { "type": "spacer", "h": 12 },
+            { "type": "button", "text": {"i18n": "menu.singleplayer"}, "style": "primary", "onClick": "open:singleplayer" },
+            { "type": "button", "text": {"i18n": "menu.multiplayer"}, "style": "ghost", "onClick": "open:multiplayer" },
+            {
+              "type": "row", "spacing": 8, "w": "match",
+              "children": [
+                { "type": "button", "text": {"i18n": "menu.options"}, "style": "ghost", "w": 196, "onClick": "open:options" },
+                { "type": "button", "text": {"i18n": "options.language"}, "style": "ghost", "w": 196, "onClick": "open:language" }
+              ]
+            },
+            { "type": "button", "text": {"i18n": "menu.quit"}, "style": "ghost", "onClick": "quit" }
+          ]
+        }
+      ]
+    }
+  ]
+}

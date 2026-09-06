@@ -331,13 +331,30 @@ class VulkanPanorama(private val ctx: VulkanContext, equirect: ByteBuffer, val w
 
                     var r = 0; var g = 0; var b = 0
                     if (bestF >= 0) {
-                        val cu = (bestU.coerceIn(0f, 1f) * faceSize).toInt().coerceIn(0, faceSize - 1)
-                        val cv = (bestV.coerceIn(0f, 1f) * faceSize).toInt().coerceIn(0, faceSize - 1)
-                        val idx = (cv * faceSize + cu) * 4
+                        // bilinear sample of the face at (bestU, bestV)
+                        val fx = bestU.coerceIn(0f, 1f) * faceSize - 0.5f
+                        val fy = bestV.coerceIn(0f, 1f) * faceSize - 0.5f
+                        val x0 = kotlin.math.floor(fx).toInt().coerceIn(0, faceSize - 1)
+                        val y0 = kotlin.math.floor(fy).toInt().coerceIn(0, faceSize - 1)
+                        val x1 = kotlin.math.min(x0 + 1, faceSize - 1)
+                        val y1 = kotlin.math.min(y0 + 1, faceSize - 1)
+                        val tx = (fx - kotlin.math.floor(fx)).coerceIn(0f, 1f)
+                        val ty = (fy - kotlin.math.floor(fy)).coerceIn(0f, 1f)
                         val face = faces[bestF]
-                        r = face.get(idx).toInt() and 0xFF
-                        g = face.get(idx + 1).toInt() and 0xFF
-                        b = face.get(idx + 2).toInt() and 0xFF
+                        fun texel(cx: Int, cy: Int, ch: Int): Float {
+                            val v = face.get((cy * faceSize + cx) * 4 + ch).toInt() and 0xFF
+                            return v.toFloat()
+                        }
+                        for (ch in 0 until 3) {
+                            val top = texel(x0, y0, ch) * (1 - tx) + texel(x1, y0, ch) * tx
+                            val bot = texel(x0, y1, ch) * (1 - tx) + texel(x1, y1, ch) * tx
+                            val v = (top * (1 - ty) + bot * ty).toInt()
+                            when (ch) {
+                                0 -> r = v
+                                1 -> g = v
+                                else -> b = v
+                            }
+                        }
                     }
                     out.put(r.toByte()).put(g.toByte()).put(b.toByte()).put(0xFF.toByte())
                 }
@@ -346,9 +363,38 @@ class VulkanPanorama(private val ctx: VulkanContext, equirect: ByteBuffer, val w
             return out
         }
 
+        /** Stretches a raw RGBA buffer to a new size (for pack-provided backgrounds). */
+        fun stretch(src: ByteBuffer, srcW: Int, srcH: Int, dstW: Int, dstH: Int): ByteBuffer {
+            val img = BufferedImage(dstW, dstH, BufferedImage.TYPE_INT_ARGB)
+            val argbSrc = BufferedImage(srcW, srcH, BufferedImage.TYPE_INT_ARGB)
+            for (y in 0 until srcH) {
+                for (x in 0 until srcW) {
+                    val i = (y * srcW + x) * 4
+                    val r = src.get(i).toInt() and 0xFF
+                    val g = src.get(i + 1).toInt() and 0xFF
+                    val b = src.get(i + 2).toInt() and 0xFF
+                    val a = src.get(i + 3).toInt() and 0xFF
+                    argbSrc.setRGB(x, y, (a shl 24) or (r shl 16) or (g shl 8) or b)
+                }
+            }
+            val g2 = img.createGraphics()
+            g2.drawImage(argbSrc, 0, 0, dstW, dstH, null)
+            g2.dispose()
+            val out = MemoryUtil.memAlloc(dstW * dstH * 4)
+            val px = IntArray(dstW * dstH)
+            img.getRGB(0, 0, dstW, dstH, px, 0, dstW)
+            for (p in px) {
+                out.put(((p shr 16) and 0xFF).toByte())
+                out.put(((p shr 8) and 0xFF).toByte())
+                out.put(p.and(0xFF).toByte())
+                out.put(((p shr 24) and 0xFF).toByte())
+            }
+            out.flip()
+            return out
+        }
+
         /** Decodes a PNG stream into tightly packed RGBA bytes. */
-        fun decodePngRgba(stream: InputStream): Pair<Int, ByteBuffer> {
-            val src = ImageIO.read(stream) ?: throw IllegalStateException("unreadable panorama image")
+        fun decodePngRgba(stream: InputStream): Pair<Int, ByteBuffer> {            val src = ImageIO.read(stream) ?: throw IllegalStateException("unreadable panorama image")
             val w = src.width
             val h = src.height
             val argb = if (src.type == BufferedImage.TYPE_INT_ARGB) src

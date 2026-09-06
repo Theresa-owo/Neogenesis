@@ -1,7 +1,10 @@
 package net.theresa.ui.render
 
+import net.minecraft.client.Minecraft
 import net.theresa.render.vulkan.VulkanContext
+import net.theresa.ui.NeoUI
 import net.theresa.ui.font.FontEngine
+import net.theresa.ui.scene.UiNode
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
@@ -59,9 +62,10 @@ class UiRenderer(
     private var pipelineLayout = NULL
     private var panoramaPipeline = NULL
     private var blurPipeline = NULL
+    private var surfacePipeline = NULL
     private var textPipeline = NULL
 
-    private val font: FontEngine = FontEngine.create(ctx)
+    val font: FontEngine = FontEngine.create(ctx)
     private val ring = UiBufferRing(ctx)
     private val pageSets = ArrayList<Long>()
     private var uiFrameIndex = 0
@@ -81,22 +85,50 @@ class UiRenderer(
     // Resources
     // ------------------------------------------------------------------
 
+    /**
+     * Background loading, resource-pack aware:
+     *  1. assets/neogenesis/ui/background.png (a 2:1 equirectangular image) if
+     *     any pack provides one;
+     *  2. otherwise the six vanilla panorama faces (minecraft namespace), which
+     *     packs may also replace individually; baked into a 4096x2048 equirect
+     *     with bilinear filtering.
+     */
     private fun loadPanorama(): VulkanPanorama {
+        val outW = 4096
+        val outH = 2048
         val faces = ArrayList<Pair<Int, ByteBuffer>>(6)
         try {
+            val rm = Minecraft.getMinecraft().getResourceManager()
+            var custom: Pair<Int, ByteBuffer>? = null
+            try {
+                val res = rm.getResource(net.minecraft.util.ResourceLocation("neogenesis", "ui/background.png"))
+                custom = VulkanPanorama.decodePngRgba(res.inputStream)
+            } catch (_: Exception) {
+                // no pack override, fall through to the vanilla panorama
+            }
+            if (custom != null) {
+                val (w, buf) = custom!!
+                val srcH = buf.remaining() / 4 / w
+                val scaled = VulkanPanorama.stretch(buf, w, srcH, outW, outH)
+                MemoryUtil.memFree(buf)
+                System.out.println("[NeoUI] custom background loaded (${w}x$srcH -> ${outW}x$outH)")
+                val tex = VulkanPanorama(ctx, scaled, outW, outH)
+                MemoryUtil.memFree(scaled)
+                return tex
+            }
             for (i in 0 until 6) {
-                val stream = javaClass.getResourceAsStream(
-                    "/assets/minecraft/textures/gui/title/background/panorama_$i.png"
-                ) ?: throw IllegalStateException("panorama_$i.png not found on classpath")
-                stream.use { faces.add(VulkanPanorama.decodePngRgba(it)) }
+                val res = rm.getResource(
+                    net.minecraft.util.ResourceLocation("minecraft", "textures/gui/title/background/panorama_$i.png")
+                )
+                faces.add(VulkanPanorama.decodePngRgba(res.inputStream))
             }
             val size = faces[0].first
             require(faces.all { it.first == size }) { "panorama faces differ in size" }
             val t0 = System.nanoTime()
-            val equirect = VulkanPanorama.bakeEquirect(faces.map { it.second }, size)
+            val equirect = VulkanPanorama.bakeEquirect(faces.map { it.second }, size, outW, outH)
             val ms = (System.nanoTime() - t0) / 1_000_000
-            System.out.println("[NeoUI] panorama baked: 6x${size}x$size -> 2048x1024 in ${ms}ms")
-            val tex = VulkanPanorama(ctx, equirect, 2048, 1024)
+            System.out.println("[NeoUI] panorama baked: 6x${size}x$size -> ${outW}x$outH in ${ms}ms")
+            val tex = VulkanPanorama(ctx, equirect, outW, outH)
             MemoryUtil.memFree(equirect)
             return tex
         } finally {
@@ -320,6 +352,8 @@ class UiRenderer(
             val textSpvVert = UiShaders.compile(UiShaders.load("surface", UiShaders.Stage.VERTEX, UiShaders.SURFACE_VERT), UiShaders.Stage.VERTEX, "ui_surface.vert")
             val textSpvFrag = UiShaders.compile(UiShaders.load("text", UiShaders.Stage.FRAGMENT, UiShaders.TEXT_FRAG), UiShaders.Stage.FRAGMENT, "ui_text.frag")
             textPipeline = buildPipeline(stack, textSpvVert, textSpvFrag, SURFACE_STRIDE, surfaceAttributes(stack))
+            val surfaceSpvFrag = UiShaders.compile(UiShaders.load("surface", UiShaders.Stage.FRAGMENT, UiShaders.SURFACE_FRAG), UiShaders.Stage.FRAGMENT, "ui_surface.frag")
+            surfacePipeline = buildPipeline(stack, textSpvVert, surfaceSpvFrag, SURFACE_STRIDE, surfaceAttributes(stack))
         }
     }
 
@@ -329,6 +363,7 @@ class UiRenderer(
         if (panoramaPipeline != NULL) { vkDestroyPipeline(ctx.device, panoramaPipeline, null); panoramaPipeline = NULL }
         if (blurPipeline != NULL) { vkDestroyPipeline(ctx.device, blurPipeline, null); blurPipeline = NULL }
         if (textPipeline != NULL) { vkDestroyPipeline(ctx.device, textPipeline, null); textPipeline = NULL }
+        if (surfacePipeline != NULL) { vkDestroyPipeline(ctx.device, surfacePipeline, null); surfacePipeline = NULL }
         createPipelines()
         System.out.println("[NeoUI] pipelines reloaded")
     }
@@ -425,13 +460,165 @@ class UiRenderer(
                 pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
                 vkCmdDraw(cmd, 3, 1, 0, 0)
 
-                // M2 verification text: TTF glyphs over the panorama.
-                val dp = height / 1080f
-                drawText(cmd, stack, width, height,
-                    "§fNeoUI §7M2 §f— §bTTF Font Test 单人游戏 Multiplayer",
-                    64f, 64f, 30f * dp, 0xFFFFFFFF.toInt(), true)
+                val screen = net.theresa.ui.screen.ScreenManager.current
+                if (screen != null) {
+                    renderScreenTree(cmd, stack, width, height, screen)
+                }
             }
-            // Scene widget draws are appended here (M3/M4).
+            // HUD screens (in-world) are appended here (phase 2).
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Screen tree encoding
+    // ------------------------------------------------------------------
+
+    private class Batch(val page: Int, val firstVertex: Int, var quads: Int)
+
+    private fun renderScreenTree(
+        cmd: VkCommandBuffer,
+        stack: MemoryStack,
+        width: Int,
+        height: Int,
+        screen: net.theresa.ui.screen.NeoScreen,
+    ) {
+        val view = ring.slot()
+        val dp = height / 1080f * NeoUI.theme.baseScale
+        screen.root.layoutFullscreen(dp, NeoUI.theme, width.toFloat(), height.toFloat())
+        if (uiFrameIndex == 60) {
+            screen.root.walk { n ->
+                System.out.printf("[NeoUI tree] %-8s '%-14s' x=%.0f y=%.0f w=%.0f h=%.0f surface=%s shadow=%s%n",
+                    n.type, n.text.take(12), n.x, n.y, n.width, n.height, n.drawsSurface, n.shadow)
+            }
+        }
+
+        val surfaceBatches = ArrayList<Batch>()
+        val textBatches = ArrayList<Batch>()
+        var curSurface: Batch? = null
+        var curText: Batch? = null
+
+        fun startOrContinue(list: ArrayList<Batch>, cur: Batch?, page: Int): Batch {
+            val startVertex = ring.usedBytes(view) / SURFACE_STRIDE
+            val last = list.lastOrNull()
+            return if (cur != null && last === cur && cur.page == page && cur.firstVertex + cur.quads == startVertex) {
+                cur
+            } else {
+                Batch(page, startVertex, 0).also { list.add(it) }
+            }
+        }
+
+        fun vert(px: Float, py: Float, uu: Float, vv: Float, argb: Int,
+                 rw: Float, rh: Float, radius: Float, mode: Float, gradEnd: Int, border: Int) {
+            view.putFloat(px).putFloat(py)
+            view.putFloat(uu).putFloat(vv)
+            view.put(((argb shr 16) and 0xFF).toByte()).put(((argb shr 8) and 0xFF).toByte())
+                .put((argb and 0xFF).toByte()).put(((argb shr 24) and 0xFF).toByte())
+            view.putFloat(rw).putFloat(rh).putFloat(radius).putFloat(mode)
+            view.put(((gradEnd shr 16) and 0xFF).toByte()).put(((gradEnd shr 8) and 0xFF).toByte())
+                .put((gradEnd and 0xFF).toByte()).put(((gradEnd shr 24) and 0xFF).toByte())
+            view.put(((border shr 16) and 0xFF).toByte()).put(((border shr 8) and 0xFF).toByte())
+                .put((border and 0xFF).toByte()).put(((border shr 24) and 0xFF).toByte())
+        }
+
+        fun surfaceQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode, mode: Float) {
+            curSurface = startOrContinue(surfaceBatches, curSurface, 0)
+            val lift = node.hoverT * 3f
+            val x0 = x; val y0 = y - lift
+            val x1 = x0 + w; val y1 = y0 + h
+            fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, node.fillColor, w, h, node.radius, mode, node.fillEndColor, node.borderColor)
+            // fills: local pixel coords (uv), gradient t = uv.y / h
+            v(x0, y0, 0f, 0f); v(x0, y1, 0f, h); v(x1, y1, w, h)
+            v(x0, y0, 0f, 0f); v(x1, y1, w, h); v(x1, y0, w, 0f)
+            curSurface!!.quads++
+        }
+
+        fun shadowQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode) {
+            curSurface = startOrContinue(surfaceBatches, curSurface, 0)
+            val s = node.shadowSpread
+            val x0 = x - s; val y0 = y - s + node.hoverT * 3f
+            val x1 = x + w + s; val y1 = y + h + s + node.hoverT * 3f
+            fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, node.shadowColor, w, h, node.radius, 3f, node.shadowColor, 0)
+            v(x0, y0, 0f, 0f); v(x0, y1, 0f, h); v(x1, y1, w, h)
+            v(x0, y0, 0f, 0f); v(x1, y1, w, h); v(x1, y0, w, 0f)
+            curSurface!!.quads++
+        }
+
+        fun textRun(text: String, startX: Float, baseline: Float, sizeI: Int, defaultColor: Int, isShadow: Boolean) {
+            var penX = startX
+            var prev = -1
+            for ((seg, argb) in FontEngine.parseColorCodes(text, defaultColor)) {
+                for (ch in seg) {
+                    val cp = ch.code
+                    val g = font.getGlyph(cp, sizeI.toFloat())
+                    if (prev >= 0) penX += font.kern(prev, cp, sizeI.toFloat())
+                    if (g.page >= 0 && g.width > 0) {
+                        curText = startOrContinue(textBatches, curText, g.page)
+                        val x0 = penX + g.xoff
+                        val y0 = baseline + g.yoff
+                        val x1 = x0 + g.width
+                        val y1 = y0 + g.height
+                        fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, argb, 0f, 0f, 0f, 0f, 0, 0)
+                        v(x0, y0, g.u0, g.v0); v(x0, y1, g.u0, g.v1); v(x1, y1, g.u1, g.v1)
+                        v(x0, y0, g.u0, g.v0); v(x1, y1, g.u1, g.v1); v(x1, y0, g.u1, g.v0)
+                        curText!!.quads++
+                    }
+                    penX += g.advance
+                    prev = cp
+                }
+            }
+        }
+
+        fun renderNode(node: UiNode) {
+            if (!node.visible) return
+            if (node.drawsSurface) {
+                if (node.shadow) shadowQuad(node.x, node.y, node.width, node.height, node)
+                val mode = if (node.style == UiNode.STYLE_GLASS) 2f else 1f
+                surfaceQuad(node.x, node.y, node.width, node.height, node, mode)
+            }
+            if (node.text.isNotEmpty()) {
+                val sizeI = (node.textSize * dp).toInt().coerceAtLeast(1)
+                val ascent = font.ascent(sizeI.toFloat())
+                val desc = font.lineHeight(sizeI.toFloat()) - ascent
+                val baseline = node.y + (node.height - (ascent + desc)) / 2 + ascent
+                val measured = font.measure(node.text, sizeI.toFloat())
+                val startX = node.x + (node.width - measured) / 2
+                val shadowOff = 1.2f
+                if (node.textShadow) {
+                    val shArgb = (0x80 shl 24) or (((node.textColor and 0x00FFFFFF) shr 2) and 0x00FFFFFF)
+                    textRun(node.text, startX + shadowOff, baseline + shadowOff, sizeI, shArgb, true)
+                }
+                textRun(node.text, startX, baseline, sizeI, node.textColor, false)
+            }
+            for (c in node.children) renderNode(c)
+        }
+        renderNode(screen.root)
+
+        font.flushUploads()
+
+        // All surface quads share one pipeline + backdrop descriptor: one draw.
+        if (surfaceBatches.isNotEmpty()) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, surfacePipeline)
+            vkCmdBindDescriptorSets(
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
+            )
+            pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+            vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
+            for (b in surfaceBatches) {
+                vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+            }
+        }
+        if (textBatches.isNotEmpty()) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
+            pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+            vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
+            for (b in textBatches) {
+                if (b.page >= font.pageCount()) continue
+                vkCmdBindDescriptorSets(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0,
+                    stack.longs(pageSet(b.page)), null
+                )
+                vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+            }
         }
     }
 
@@ -470,102 +657,6 @@ class UiRenderer(
         }
     }
 
-    /**
-     * Encodes glyph quads into the frame's ring slot (shadow pass first, then
-     * the color pass) and records one draw per atlas page run.
-     */
-    private fun drawText(
-        cmd: VkCommandBuffer,
-        stack: MemoryStack,
-        width: Int,
-        height: Int,
-        text: String,
-        x: Float,
-        y: Float,
-        sizePx: Float,
-        color: Int,
-        shadow: Boolean,
-    ) {
-        val view = ring.slot()
-        val sizeI = sizePx.toInt().coerceAtLeast(1)
-        val ascent = font.ascent(sizeI.toFloat())
-        val shadowOffset = (sizeI / 14f).coerceAtLeast(1f)
-
-        class Batch(var page: Int, var firstVertex: Int, var quads: Int)
-
-        val batches = ArrayList<Batch>()
-        var cur: Batch? = null
-
-        fun emitQuad(bx: Float, by: Float, g: FontEngine.Glyph, argb: Int, isShadow: Boolean) {
-            if (g.page < 0 || g.width == 0) return
-            val pageIndex = g.page + if (isShadow) 1000 else 0
-            val startVertex = ring.usedBytes(view) / SURFACE_STRIDE
-            if (cur == null || cur!!.page != pageIndex || cur!!.firstVertex + cur!!.quads != startVertex) {
-                cur = Batch(pageIndex, startVertex, 0)
-                batches.add(cur!!)
-            }
-            val r = ((argb shr 16) and 0xFF).toByte()
-            val gcol = ((argb shr 8) and 0xFF).toByte()
-            val b = (argb and 0xFF).toByte()
-            val a = ((argb shr 24) and 0xFF).toByte()
-            val x0 = bx + g.xoff
-            val y0 = by + g.yoff
-            val x1 = x0 + g.width
-            val y1 = y0 + g.height
-            val u0 = g.u0; val v0 = g.v0; val u1 = g.u1; val v1 = g.v1
-            // two triangles, clockwise in y-down screen space
-            fun vert(px: Float, py: Float, uu: Float, vv: Float) {
-                view.putFloat(px).putFloat(py)
-                view.putFloat(uu).putFloat(vv)
-                view.put(r).put(gcol).put(b).put(a)
-                view.putFloat(0f).putFloat(0f).putFloat(0f).putFloat(0f)
-                view.put(0).put(0).put(0).put(0)
-                view.put(0).put(0).put(0).put(0)
-            }
-            vert(x0, y0, u0, v0); vert(x0, y1, u0, v1); vert(x1, y1, u1, v1)
-            vert(x0, y0, u0, v0); vert(x1, y1, u1, v1); vert(x1, y0, u1, v0)
-            cur!!.quads++
-        }
-
-        fun encodePass(color: Int, isShadow: Boolean, ox: Float, oy: Float) {
-            var penX = x + ox
-            val penY = y + ascent + oy
-            var prev = -1
-            for ((seg, argb) in FontEngine.parseColorCodes(text, color)) {
-                for (ch in seg) {
-                    val cp = ch.code
-                    if (cp == '\n'.code) continue
-                    val g = font.getGlyph(cp, sizeI.toFloat())
-                    if (prev >= 0) penX += font.kern(prev, cp, sizeI.toFloat())
-                    emitQuad(penX, penY, g, argb, isShadow)
-                    penX += g.advance
-                    prev = cp
-                }
-            }
-        }
-
-        if (shadow) {
-            val shadowArgb = (0x96 shl 24) or (((color and 0x00FFFFFF) shr 2) and 0x00FFFFFF)
-            encodePass(shadowArgb, true, shadowOffset, shadowOffset)
-        }
-        encodePass(color, false, 0f, 0f)
-
-        font.flushUploads()
-
-        if (batches.isEmpty()) return
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
-        pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
-        vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
-        for (batch in batches) {
-            val pageIndex = batch.page % 1000
-            if (pageIndex >= font.pageCount()) continue
-            vkCmdBindDescriptorSets(
-                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0,
-                stack.longs(pageSet(pageIndex)), null
-            )
-            vkCmdDraw(cmd, batch.quads * 6, 1, batch.firstVertex, 0)
-        }
-    }
 
     /** Swapchain resized: rebuild quarter-res targets and re-point descriptors. */
     fun onResized(width: Int, height: Int) {
@@ -581,6 +672,7 @@ class UiRenderer(
         if (panoramaPipeline != NULL) vkDestroyPipeline(ctx.device, panoramaPipeline, null)
         if (blurPipeline != NULL) vkDestroyPipeline(ctx.device, blurPipeline, null)
         if (textPipeline != NULL) vkDestroyPipeline(ctx.device, textPipeline, null)
+        if (surfacePipeline != NULL) vkDestroyPipeline(ctx.device, surfacePipeline, null)
         if (pipelineLayout != NULL) vkDestroyPipelineLayout(ctx.device, pipelineLayout, null)
         if (descriptorPool != NULL) vkDestroyDescriptorPool(ctx.device, descriptorPool, null)
         if (descriptorSetLayout != NULL) vkDestroyDescriptorSetLayout(ctx.device, descriptorSetLayout, null)
@@ -592,7 +684,7 @@ class UiRenderer(
 
     companion object {
         /** Gaussian spread in source texels per tap step. */
-        const val BLUR_SPREAD = 3.0f
+        const val BLUR_SPREAD = 4.5f
 
         /** pos2f + uv2f + tint4ub + rect4f + gradEnd4ub + border4ub. */
         const val SURFACE_STRIDE = 44

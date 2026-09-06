@@ -60,6 +60,22 @@ class FontEngine private constructor(private val ctx: VulkanContext, private val
 
     fun kern(prev: Int, next: Int, sizePx: Float): Float = font.kernAdvance(prev, next, scaleFor(sizePx))
 
+    /** Measured width of a possibly §-coded single-line string, in pixels. */
+    fun measure(text: String, sizePx: Float): Float {
+        val sizeI = sizePx.toInt().coerceAtLeast(1)
+        var width = 0f
+        var prev = -1
+        for ((seg, _) in parseColorCodes(text, 0xFF000000.toInt())) {
+            for (ch in seg) {
+                val cp = ch.code
+                if (prev >= 0) width += kern(prev, cp, sizeI.toFloat())
+                width += advance(cp, sizeI.toFloat())
+                prev = cp
+            }
+        }
+        return width
+    }
+
     fun hasGlyph(cp: Int): Boolean = font.glyphIndex(cp) != 0
 
     /** Page count (for descriptor allocation bounds). */

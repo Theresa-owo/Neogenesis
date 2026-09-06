@@ -126,7 +126,7 @@ class UiOffscreenChain(private val ctx: VulkanContext, private val imageFormat: 
 
     companion object {
         /** Backdrop targets render at 1/BACKDROP_SCALE of the swapchain extent. */
-        const val BACKDROP_SCALE = 4
+        const val BACKDROP_SCALE = 6
     }
 }
 

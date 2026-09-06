@@ -4,7 +4,13 @@ import libsrc.lwjglx.input.Keyboard
 import libsrc.lwjglx.input.Mouse
 import net.minecraft.client.Minecraft
 import net.theresa.render.vulkan.VulkanContext
+import net.theresa.ui.font.FontEngine
 import net.theresa.ui.render.UiRenderer
+import net.theresa.ui.screen.MainMenuScreen
+import net.theresa.ui.screen.NeoScreens
+import net.theresa.ui.screen.NeoScreen
+import net.theresa.ui.screen.ScreenManager
+import net.theresa.ui.style.Theme
 
 /**
  * NeoUI facade: the single integration point between the game loop / Vulkan
@@ -12,27 +18,46 @@ import net.theresa.ui.render.UiRenderer
  *
  * Frame contract (Vulkan mode):
  *  - [tick]       early in Minecraft.runGameLoop: drains input in menu context,
- *                 advances screens/animations (input & screens from M3/M4 on).
+ *                 advances screens/animations (real input in M4).
  *  - [prepare]    before the main render pass: records the offscreen panorama
  *                 + blur passes into the same command buffer.
  *  - [renderInPass] inside the main render pass: records all UI draws
- *                 (menu background; HUD overlay once HUD screens exist).
+ *                 (menu background + screens; HUD overlay once HUD screens exist).
  */
 object NeoUI {
 
     private var renderer: UiRenderer? = null
 
+    /** Active theme (theme.json overrides, hot-reloadable later). */
+    lateinit var theme: Theme
+        private set
+
+    /** Glyph engine used by the scene for text measurement. */
+    var font: FontEngine? = null
+        private set
+
     val isReady: Boolean get() = renderer != null
 
     fun init(ctx: VulkanContext, window: Long, imageFormat: Int, width: Int, height: Int) {
         destroy()
+        theme = Theme.load()
         try {
             renderer = UiRenderer(ctx, window, imageFormat, width, height)
+            font = renderer!!.font
         } catch (t: Throwable) {
             System.err.println("[NeoUI] init failed, GUI disabled this session: $t")
             t.printStackTrace()
             renderer = null
         }
+        registerBuiltins()
+        // Demo entry: the main menu (replaced by world/HUD routing in M4).
+        if (menuContext()) {
+            ScreenManager.show(NeoScreens.create("main_menu"))
+        }
+    }
+
+    private fun registerBuiltins() {
+        NeoScreens.register("main_menu") { MainMenuScreen.build() }
     }
 
     /** Swapchain extent changed: rebuild quarter-res backdrop targets. */
@@ -54,7 +79,7 @@ object NeoUI {
                 // consumed by the input dispatcher (M4)
             }
         }
-        // screen stack + animation ticking arrive with the scene layer
+        // animation ticking arrives with M4
     }
 
     /** Offscreen backdrop passes; must be recorded before the main render pass. */
@@ -64,7 +89,7 @@ object NeoUI {
 
     /**
      * UI draws inside the main render pass, after terrain (or after the clear
-     * in menu mode). Menu background only renders with no world loaded.
+     * in menu mode). Menu screens only render with no world loaded.
      */
     fun renderInPass(cmd: org.lwjgl.vulkan.VkCommandBuffer, width: Int, height: Int) {
         val r = renderer ?: return
@@ -83,6 +108,16 @@ object NeoUI {
     fun destroy() {
         renderer?.destroy()
         renderer = null
+    }
+
+    /** onClick action protocol from layouts/widgets (see ScreenManager). */
+    fun handleAction(action: String) {
+        ScreenManager.handleAction(action)
+    }
+
+    /** Custom actions for mods: routed on the UI event bus (M4+). */
+    fun emitCustom(event: String) {
+        System.out.println("[NeoUI] custom action: $event")
     }
 
     private fun menuContext(): Boolean {
