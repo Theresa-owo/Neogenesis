@@ -1058,6 +1058,12 @@ public class Minecraft implements IThreadListener {
             }
         }
 
+        if (net.theresa.render.RenderSystem.isVulkan()) {
+            // NeoUI owns input/screens/animations; runs before vanilla input
+            // dispatch so the menu can consume events vanilla would swallow
+            net.theresa.ui.NeoUI.INSTANCE.tick();
+        }
+
         if (this.currentScreen != null) {
             try {
                 this.currentScreen.handleInput();

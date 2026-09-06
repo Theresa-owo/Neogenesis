@@ -173,6 +173,8 @@ public class VulkanRenderer {
                 VK10.VK_FORMAT_R8G8B8A8_UNORM, false);
         createDescriptorResources();
         createTerrainPipelines();
+        net.theresa.ui.NeoUI.INSTANCE.init(context, window, swapchain.imageFormat,
+                swapchain.width, swapchain.height);
     }
 
     public void frame() {
@@ -329,7 +331,12 @@ public class VulkanRenderer {
                     .sType(VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
             VulkanContext.check(VK10.vkBeginCommandBuffer(frame.commandBuffer, beginInfo), "vkBeginCommandBuffer");
 
+            // Offscreen panorama + acrylic blur chain, then the main pass with
+            // the UI drawn on top (menu background; no-op when world HUD empty)
+            net.theresa.ui.NeoUI.INSTANCE.prepare(frame.commandBuffer);
             beginRenderPass(frame.commandBuffer, imageIndex, stack);
+            net.theresa.ui.NeoUI.INSTANCE.renderInPass(frame.commandBuffer,
+                    swapchain.width, swapchain.height);
             VK10.vkCmdEndRenderPass(frame.commandBuffer);
             VulkanContext.check(VK10.vkEndCommandBuffer(frame.commandBuffer), "vkEndCommandBuffer");
 
@@ -411,6 +418,10 @@ public class VulkanRenderer {
                 }
                 drawChunks(commandBuffer, visible, mvp, stack);
             }
+
+            // HUD layer over the terrain (same subpass; empty until HUD screens exist)
+            net.theresa.ui.NeoUI.INSTANCE.renderInPass(commandBuffer,
+                    swapchain.width, swapchain.height);
 
             VK10.vkCmdEndRenderPass(commandBuffer);
 
@@ -775,6 +786,7 @@ public class VulkanRenderer {
             System.err.println("[Vulkan] shader reload failed, world will not draw until next successful reload: " + t);
             t.printStackTrace();
         }
+        net.theresa.ui.NeoUI.INSTANCE.reloadPipelines();
     }
 
     private void createTerrainPipelines() {
@@ -1012,13 +1024,23 @@ public class VulkanRenderer {
                     .pDepthStencilAttachment(depthRef);
 
             org.lwjgl.vulkan.VkSubpassDependency.Buffer dependency =
-                    org.lwjgl.vulkan.VkSubpassDependency.calloc(1, stack)
+                    org.lwjgl.vulkan.VkSubpassDependency.calloc(2, stack)
                             .srcSubpass(VK10.VK_SUBPASS_EXTERNAL)
                             .dstSubpass(0)
                             .srcStageMask(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
                             .dstStageMask(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
                             .srcAccessMask(0)
                             .dstAccessMask(VK10.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+            // NeoUI records offscreen backdrop passes into the same command
+            // buffer before this pass; order those color writes before the GUI
+            // pipelines' fragment reads of the blurred backdrop.
+            dependency.get(1)
+                    .srcSubpass(VK10.VK_SUBPASS_EXTERNAL)
+                    .dstSubpass(0)
+                    .srcStageMask(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                    .dstStageMask(VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                    .srcAccessMask(VK10.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+                    .dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT);
 
             VkRenderPassCreateInfo info = VkRenderPassCreateInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO)
@@ -1174,6 +1196,7 @@ public class VulkanRenderer {
         createDepthResources();
         createImageRenderFinishedSemaphores();
         createFramebuffers();
+        net.theresa.ui.NeoUI.INSTANCE.onResized(swapchain.width, swapchain.height);
         framebufferResized = false;
     }
 
@@ -1183,6 +1206,7 @@ public class VulkanRenderer {
 
     public void cleanup() {
         context.waitIdle();
+        net.theresa.ui.NeoUI.INSTANCE.destroy();
         VulkanWorldBridge.detach();
         if (chunkStore != null) {
             chunkStore.destroy();
