@@ -1175,6 +1175,11 @@ public class Minecraft implements IThreadListener {
     }
 
     public int getLimitFramerate() {
+        // Vulkan/NeoUI path: the vanilla 30fps main-menu throttle must not
+        // apply (NeoUI renders uncapped and animates on every frame)
+        if (net.theresa.render.RenderSystem.isVulkan()) {
+            return (int) GameSettings.Options.FRAMERATE_LIMIT.getValueMax();
+        }
         return this.theWorld == null && this.currentScreen != null ? 30 : this.gameSettings.limitFramerate;
     }
 

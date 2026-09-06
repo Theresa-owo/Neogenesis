@@ -7,7 +7,7 @@
         {
           "type": "column", "spacing": 12, "w": "match",
           "children": [
-            { "type": "label", "text": "§bNEOGENESIS", "textSize": 46, "w": "match" },
+            { "type": "label", "text": "NEOGENESIS", "textSize": 44, "w": "match" },
             { "type": "label", "text": "§8Vulkan Native UI", "textSize": 16, "textColor": "#FF9AA0A8", "w": "match" },
             { "type": "panel", "style": "primary", "w": 64, "h": 4, "radius": 2, "shadow": false },
             { "type": "spacer", "h": 14 },

@@ -115,6 +115,9 @@ public class VulkanRenderer {
     private boolean reloadQueued;
     private boolean prevF9Down;
     private boolean prevF8Down;
+    private int menuProbeFrames;
+    private long menuProbeLast;
+    private final long[] menuStageAcc = new long[5];
     private int staleDraws;
     private long drawRangeSkips;
 
@@ -178,6 +181,7 @@ public class VulkanRenderer {
     }
 
     public void frame() {
+        net.theresa.ui.NeoUI.INSTANCE.probeFrame();
         pollFramebufferSize();
         if (framebufferResized) {
             recreate();
@@ -316,16 +320,16 @@ public class VulkanRenderer {
     }
 
     private void renderClearFrame() {
+        long tStart = System.nanoTime();
         VulkanFrame frame = frames[currentFrame];
         VulkanContext.check(VK10.vkWaitForFences(context.device, frame.fence, true, 5_000_000_000L),
                 "vkWaitForFences");
+        long tFence = System.nanoTime();
         frame.resetFence();
         int imageIndex = swapchain.acquire(frame.imageAvailable);
-        if (imageIndex < 0) {
-            recreate();
-            return;
-        }
+        long tAcquire = System.nanoTime();
 
+        long t0 = tAcquire;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
@@ -339,7 +343,10 @@ public class VulkanRenderer {
                     swapchain.width, swapchain.height);
             VK10.vkCmdEndRenderPass(frame.commandBuffer);
             VulkanContext.check(VK10.vkEndCommandBuffer(frame.commandBuffer), "vkEndCommandBuffer");
+        }
+        long t1 = System.nanoTime();
 
+        try (MemoryStack stack = MemoryStack.stackPush()) {
             VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack)
                     .sType(VK10.VK_STRUCTURE_TYPE_SUBMIT_INFO)
                     .waitSemaphoreCount(1)
@@ -349,8 +356,34 @@ public class VulkanRenderer {
                     .pSignalSemaphores(stack.longs(imageRenderFinished[imageIndex]));
             VulkanContext.check(VK10.vkQueueSubmit(context.graphicsQueue, submitInfo, frame.fence), "vkQueueSubmit");
         }
+        long t2 = System.nanoTime();
 
         boolean suboptimal = swapchain.present(context.presentQueue, imageRenderFinished[imageIndex], imageIndex);
+        long t3 = System.nanoTime();
+
+        // menu fps + stage breakdown probe (every 240 frames)
+        menuProbeFrames++;
+        menuStageAcc[0] += tFence - tStart;
+        menuStageAcc[1] += tAcquire - tFence;
+        menuStageAcc[2] += t1 - tAcquire;
+        menuStageAcc[3] += t2 - t1;
+        menuStageAcc[4] += t3 - t2;
+        if (menuProbeFrames >= 240) {
+            long now = System.nanoTime();
+            if (menuProbeLast != 0) {
+                double fps = menuProbeFrames * 1000.0 / ((now - menuProbeLast) / 1e6);
+                System.out.printf(
+                        "[VulkanMenu fps] %.0f | fenceWait %.2f acquire %.2f record %.2f submit %.2f present %.2f (ms avg)%n",
+                        fps,
+                        menuStageAcc[0] / 240.0 / 1e6, menuStageAcc[1] / 240.0 / 1e6,
+                        menuStageAcc[2] / 240.0 / 1e6, menuStageAcc[3] / 240.0 / 1e6,
+                        menuStageAcc[4] / 240.0 / 1e6);
+            }
+            menuProbeLast = now;
+            menuProbeFrames = 0;
+            java.util.Arrays.fill(menuStageAcc, 0);
+        }
+
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
         if (suboptimal) {
             recreate();

@@ -10,7 +10,7 @@ import net.theresa.ui.style.Theme
  * Draw order = tree order: a node paints its surface quad (shadow + fill),
  * then its children, so z is implicit.
  */
-open class UiNode(val type: String) {
+open class UiNode(var type: String) {
 
     // ---- computed bounds (px) ----
     var x = 0f; var y = 0f; var width = 0f; var height = 0f

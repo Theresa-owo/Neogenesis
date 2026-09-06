@@ -91,6 +91,13 @@ object JsonLayout {
         o.get("textColor")?.asString?.let { node.textColor = parseColor(it) }
         o.get("text")?.let { node.text = resolveText(it) }
         o.get("onClick")?.asString?.let { action -> node.onClick = { NeoUI.handleAction(action) } }
+        // MD3 pill buttons: radius tracks the button height, label uses the
+        // on-primary / on-surface color per style
+        if (node.type == "button") {
+            node.radius = node.dpHeight.coerceAtLeast(1f) / 2f
+            node.textColor =
+                if (node.style == UiNode.STYLE_PRIMARY) NeoUI.theme.onAccentArgb else NeoUI.theme.textArgb
+        }
 
         o.getAsJsonArray("children")?.forEach { child ->
             node.add(build(child.asJsonObject, theme))

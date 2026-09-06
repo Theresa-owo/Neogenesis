@@ -29,7 +29,7 @@ object Widgets {
             }
             UiNode.STYLE_PRIMARY -> {
                 node.fillColor = NeoUI.theme.accentArgb; node.fillEndColor = NeoUI.theme.accentEndArgb
-                node.borderColor = 0x33FFFFFF
+                node.borderColor = 0x00000000
                 node.shadow = false
             }
             UiNode.STYLE_GHOST -> {
@@ -56,15 +56,17 @@ object Widgets {
         drawsSurface = false
         }
 
-    fun button(text: String, style: Int = UiNode.STYLE_PRIMARY, wDp: Float = 380f, hDp: Float = 56f): UiNode =
+    /** MD3 filled button: 44dp tall full-radius pill with on-primary label. */
+    fun button(text: String, style: Int = UiNode.STYLE_PRIMARY, wDp: Float = 380f, hDp: Float = 44f): UiNode =
         panel("button", style).apply {
             widthMode = UiNode.SIZE_FIXED
             heightMode = UiNode.SIZE_FIXED
             dpWidth = wDp
             dpHeight = hDp
-            radius = NeoUI.theme.radius
+            radius = hDp / 2f
+            val labelColor = if (style == UiNode.STYLE_PRIMARY) NeoUI.theme.onAccentArgb else NeoUI.theme.textArgb
             add(
-                label(text, NeoUI.theme.fontSize + 3f, NeoUI.theme.textArgb).apply {
+                label(text, NeoUI.theme.fontSize, labelColor).apply {
                     anchorX = 0.5f; anchorY = 0.5f; pivotX = 0.5f; pivotY = 0.5f
                 }
             )

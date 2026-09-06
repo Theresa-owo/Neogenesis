@@ -3,22 +3,26 @@ package net.theresa.ui.style
 import com.google.gson.JsonObject
 
 /**
- * NeoUI theme: every visual constant the renderer needs, loaded from
+ * NeoUI theme following the Material Design 3 dark baseline
+ * (https://m3.material.io/components): primary/secondary-container tonal
+ * colors, surface containers, 28dp extra-large shape scale for cards and
+ * full-radius pills for buttons. Loaded from
  * assets/neogenesis/ui/theme.json in resource packs (moddable) with
  * code-level defaults as fallback.
  */
 data class Theme(
-    val surface: Long = 0xB310141B,         // frosted glass tint (ARGB)
-    val surfaceBorder: Long = 0x26FFFFFF,    // hairline border over glass
-    val surfaceSolid: Long = 0xF21A1E26,     // solid panel fill
-    val accent: Long = 0xFF7C5CFF,           // primary button fill
-    val accentEnd: Long = 0xFF6A49E8,        // primary button gradient end
-    val ghost: Long = 0x4DFFFFFF,            // secondary button fill
-    val ghostBorder: Long = 0x4DFFFFFF,
-    val text: Long = 0xFFF2F3F5,
-    val textMuted: Long = 0xFF9AA0A8,
-    val shadow: Long = 0x66000000,
-    val radius: Float = 16f,
+    val surface: Long = 0xC0FFFFFF,          // glass tint over blurred backdrop
+    val surfaceBorder: Long = 0x14000000,    // hairline border over glass
+    val surfaceSolid: Long = 0xF2211F26,     // surface-container-high fill
+    val accent: Long = 0xFFD0BCFF,           // MD3 dark primary
+    val accentEnd: Long = 0xFFD0BCFF,        // MD3 is flat; kept for gradients
+    val onAccent: Long = 0xFF381E72,         // MD3 on-primary
+    val ghost: Long = 0x804A4458,            // secondary-container @ 50%
+    val ghostBorder: Long = 0x00000000,      // tonal buttons have no outline
+    val text: Long = 0xFF1F2126,             // on-surface
+    val textMuted: Long = 0xFF6E7078,        // on-surface-variant
+    val shadow: Long = 0x52000000,
+    val radius: Float = 28f,                 // MD3 extra-large shape
     val baseScale: Float = 1f,
     val fontSize: Float = 20f,
     val entranceMs: Long = 280,
@@ -29,6 +33,7 @@ data class Theme(
     val surfaceSolidArgb: Int get() = surfaceSolid.toInt()
     val accentArgb: Int get() = accent.toInt()
     val accentEndArgb: Int get() = accentEnd.toInt()
+    val onAccentArgb: Int get() = onAccent.toInt()
     val ghostArgb: Int get() = ghost.toInt()
     val ghostBorderArgb: Int get() = ghostBorder.toInt()
     val textArgb: Int get() = text.toInt()
@@ -65,6 +70,7 @@ data class Theme(
                 surfaceSolid = color("surfaceSolid", d.surfaceSolid),
                 accent = color("accent", d.accent),
                 accentEnd = color("accentEnd", d.accentEnd),
+                onAccent = color("onAccent", d.onAccent),
                 ghost = color("ghost", d.ghost),
                 ghostBorder = color("ghostBorder", d.ghostBorder),
                 text = color("text", d.text),

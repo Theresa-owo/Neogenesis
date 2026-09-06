@@ -5,7 +5,9 @@ import libsrc.lwjglx.input.Mouse
 import net.minecraft.client.Minecraft
 import net.theresa.render.vulkan.VulkanContext
 import net.theresa.ui.font.FontEngine
+import net.theresa.ui.lua.LuaUiRuntime
 import net.theresa.ui.render.UiRenderer
+import net.theresa.ui.screen.InputDispatcher
 import net.theresa.ui.screen.MainMenuScreen
 import net.theresa.ui.screen.NeoScreens
 import net.theresa.ui.screen.NeoScreen
@@ -50,10 +52,18 @@ object NeoUI {
             t.printStackTrace()
             renderer = null
         }
-        registerBuiltins()
-        // Demo entry: the main menu (replaced by world/HUD routing in M4).
         if (menuContext()) {
-            ScreenManager.show(NeoScreens.create("main_menu"))
+            try {
+                val runtime = LuaUiRuntime()
+                runtime.start()
+                luaRuntime = runtime
+            } catch (t: Throwable) {
+                System.err.println("[NeoUI] Lua UI failed, falling back to code menus: $t")
+                t.printStackTrace()
+                luaRuntime = null
+                registerBuiltins()
+                ScreenManager.show(NeoScreens.create("main_menu"))
+            }
         }
         System.out.printf("[NeoUI] init complete in %.0fms%n", (System.nanoTime() - t0) / 1e6)
     }
@@ -67,27 +77,53 @@ object NeoUI {
         renderer?.onResized(width, height)
     }
 
+    private var lastTickNano = 0L
+
     /**
      * Per-frame logic on the client thread. In menu context (no world) the
      * vanilla gameplay input loops have nothing meaningful to consume, so NeoUI
      * owns the event queues here; in-world they are left to vanilla.
      */
     fun tick() {
+        val now = System.nanoTime()
+        val dtMs = if (lastTickNano == 0L) 16f
+        else ((now - lastTickNano) / 1e6).toFloat().coerceIn(0.05f, 100f)
+        lastTickNano = now
+
+        val screen = ScreenManager.current
         if (menuContext()) {
-            while (Mouse.next()) {
-                // consumed by the input dispatcher (M4)
-            }
-            while (Keyboard.next()) {
-                // consumed by the input dispatcher (M4)
+            if (screen != null && renderer != null) {
+                InputDispatcher.tick(screen)
+            } else {
+                while (Mouse.next()) {
+                }
+                while (Keyboard.next()) {
+                }
             }
         }
-        // animation ticking arrives with M4
+        screen?.tickAnimations(now, theme.entranceMs)
+        // hover state-layer tween: frame-rate independent exponential smoothing
+        // (~45ms time constant) so the animation looks identical at any fps
+        val k = 1f - Math.exp(-dtMs / 45.0).toFloat()
+        screen?.root?.walk { n ->
+            val target = if (n.hover) 1f else 0f
+            n.hoverT += (target - n.hoverT) * k
+            if (kotlin.math.abs(n.hoverT - target) < 0.005f) n.hoverT = target
+        }
+        luaRuntime?.tickFrame(dtMs / 1000f)
     }
 
     /** Offscreen backdrop passes; must be recorded before the main render pass. */
     fun prepare(cmd: org.lwjgl.vulkan.VkCommandBuffer) {
         renderer?.prepare(cmd)
     }
+
+    /** Per-frame fps probe (prints menu render fps every 240 frames). */
+    fun probeFrame() {
+        renderer?.probeFrame()
+    }
+
+    private var luaRuntime: LuaUiRuntime? = null
 
     /**
      * UI draws inside the main render pass, after terrain (or after the clear
@@ -108,12 +144,18 @@ object NeoUI {
     }
 
     fun destroy() {
+        luaRuntime?.destroy()
+        luaRuntime = null
         renderer?.destroy()
         renderer = null
     }
 
     /** onClick action protocol from layouts/widgets (see ScreenManager). */
     fun handleAction(action: String) {
+        if (action.startsWith("open:")) {
+            val id = action.removePrefix("open:")
+            if (luaRuntime?.openScreen(id) == true) return
+        }
         ScreenManager.handleAction(action)
     }
 

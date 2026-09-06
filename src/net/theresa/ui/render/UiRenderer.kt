@@ -410,25 +410,27 @@ class UiRenderer(
             vkCmdDraw(cmd, 3, 1, 0, 0)
             vkCmdEndRenderPass(cmd)
 
-            // Pass 2: horizontal blur rt0 -> rt1
-            chain.beginPass(cmd, rt1)
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline)
-            vkCmdBindDescriptorSets(
-                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
-            )
-            pushConstants(cmd, stack, rt1.width, rt1.height, 1f / rt0.width, 1f / rt0.height, BLUR_SPREAD, 0f)
-            vkCmdDraw(cmd, 3, 1, 0, 0)
-            vkCmdEndRenderPass(cmd)
+            // Passes 2-7: three H/V gaussian iterations — an isotropic wash
+            // strong enough to erase the source's blocky features entirely.
+            for (iteration in 0 until 3) {
+                chain.beginPass(cmd, rt1)
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline)
+                vkCmdBindDescriptorSets(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
+                )
+                pushConstants(cmd, stack, rt1.width, rt1.height, 1f / rt0.width, 1f / rt0.height, BLUR_SPREAD, 0f)
+                vkCmdDraw(cmd, 3, 1, 0, 0)
+                vkCmdEndRenderPass(cmd)
 
-            // Pass 3: vertical blur rt1 -> rt0 (final backdrop)
-            chain.beginPass(cmd, rt0)
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline)
-            vkCmdBindDescriptorSets(
-                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt1Set), null
-            )
-            pushConstants(cmd, stack, rt0.width, rt0.height, 1f / rt1.width, 1f / rt1.height, 0f, BLUR_SPREAD)
-            vkCmdDraw(cmd, 3, 1, 0, 0)
-            vkCmdEndRenderPass(cmd)
+                chain.beginPass(cmd, rt0)
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline)
+                vkCmdBindDescriptorSets(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt1Set), null
+                )
+                pushConstants(cmd, stack, rt0.width, rt0.height, 1f / rt1.width, 1f / rt1.height, 0f, BLUR_SPREAD)
+                vkCmdDraw(cmd, 3, 1, 0, 0)
+                vkCmdEndRenderPass(cmd)
+            }
         }
     }
 
@@ -498,6 +500,10 @@ class UiRenderer(
         var curSurface: Batch? = null
         var curText: Batch? = null
 
+        // screen entrance: whole tree slides up + fades in (smoothstepped)
+        val entrance = screen.entranceT
+        val entranceLift = (1f - entrance) * 70f
+
         fun startOrContinue(list: ArrayList<Batch>, cur: Batch?, page: Int): Batch {
             val startVertex = ring.usedBytes(view) / SURFACE_STRIDE
             val last = list.lastOrNull()
@@ -513,20 +519,33 @@ class UiRenderer(
             view.putFloat(px).putFloat(py)
             view.putFloat(uu).putFloat(vv)
             view.put(((argb shr 16) and 0xFF).toByte()).put(((argb shr 8) and 0xFF).toByte())
-                .put((argb and 0xFF).toByte()).put(((argb shr 24) and 0xFF).toByte())
+                .put((argb and 0xFF).toByte()).put((((argb shr 24) and 0xFF) * entrance).toInt().toByte())
             view.putFloat(rw).putFloat(rh).putFloat(radius).putFloat(mode)
             view.put(((gradEnd shr 16) and 0xFF).toByte()).put(((gradEnd shr 8) and 0xFF).toByte())
-                .put((gradEnd and 0xFF).toByte()).put(((gradEnd shr 24) and 0xFF).toByte())
+                .put((gradEnd and 0xFF).toByte()).put((((gradEnd shr 24) and 0xFF) * entrance).toInt().toByte())
             view.put(((border shr 16) and 0xFF).toByte()).put(((border shr 8) and 0xFF).toByte())
-                .put((border and 0xFF).toByte()).put(((border shr 24) and 0xFF).toByte())
+                .put((border and 0xFF).toByte()).put((((border shr 24) and 0xFF) * entrance).toInt().toByte())
+        }
+
+        /** MD3 state layer: mixes a fill toward white by the hover/press amount. */
+        fun stateLayer(color: Int, node: UiNode): Int {
+            val t = node.hoverT * 0.12f + if (node.pressed) 0.10f else 0f
+            if (t <= 0f) return color
+            fun ch(v: Int, shift: Int): Int {
+                val c = (v shr shift) and 0xFF
+                return (c + ((255 - c) * t).toInt()).coerceAtMost(255)
+            }
+            return (ch(color, 24) shl 24) or (ch(color, 16) shl 16) or (ch(color, 8) shl 8) or ch(color, 0)
         }
 
         fun surfaceQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode, mode: Float) {
             curSurface = startOrContinue(surfaceBatches, curSurface, 0)
             val lift = node.hoverT * 3f
-            val x0 = x; val y0 = y - lift
+            val fill = stateLayer(node.fillColor, node)
+            val fillEnd = stateLayer(node.fillEndColor, node)
+            val x0 = x; val y0 = y - lift + entranceLift
             val x1 = x0 + w; val y1 = y0 + h
-            fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, node.fillColor, w, h, node.radius, mode, node.fillEndColor, node.borderColor)
+            fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, fill, w, h, node.radius, mode, fillEnd, node.borderColor)
             // fills: local pixel coords (uv), gradient t = uv.y / h
             v(x0, y0, 0f, 0f); v(x0, y1, 0f, h); v(x1, y1, w, h)
             v(x0, y0, 0f, 0f); v(x1, y1, w, h); v(x1, y0, w, 0f)
@@ -536,8 +555,8 @@ class UiRenderer(
         fun shadowQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode) {
             curSurface = startOrContinue(surfaceBatches, curSurface, 0)
             val s = node.shadowSpread
-            val x0 = x - s; val y0 = y - s + node.hoverT * 3f
-            val x1 = x + w + s; val y1 = y + h + s + node.hoverT * 3f
+            val x0 = x - s; val y0 = y - s + node.hoverT * 3f + entranceLift
+            val x1 = x + w + s; val y1 = y + h + s + node.hoverT * 3f + entranceLift
             fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, node.shadowColor, w, h, node.radius, 3f, node.shadowColor, 0)
             v(x0, y0, 0f, 0f); v(x0, y1, 0f, h); v(x1, y1, w, h)
             v(x0, y0, 0f, 0f); v(x1, y1, w, h); v(x1, y0, w, 0f)
@@ -555,7 +574,7 @@ class UiRenderer(
                     if (g.page >= 0 && g.width > 0) {
                         curText = startOrContinue(textBatches, curText, g.page)
                         val x0 = penX + g.xoff
-                        val y0 = baseline + g.yoff
+                        val y0 = baseline + g.yoff + entranceLift
                         val x1 = x0 + g.width
                         val y1 = y0 + g.height
                         fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, argb, 0f, 0f, 0f, 0f, 0, 0)
@@ -668,6 +687,24 @@ class UiRenderer(
         writeSamplerDescriptors()
     }
 
+    // menu fps probe: frames counted between prints (no world path)
+    private var probeFrames = 0
+    private var probeLast = 0L
+
+    /** Called once per frame for every path; prints menu fps every 240 frames. */
+    fun probeFrame() {
+        probeFrames++
+        if (probeFrames >= 240) {
+            val now = System.nanoTime()
+            if (probeLast != 0L) {
+                val fps = probeFrames.toDouble() / ((now - probeLast) / 1e9)
+                System.out.printf("[NeoUI fps] %.0f%n", fps)
+            }
+            probeLast = now
+            probeFrames = 0
+        }
+    }
+
     fun destroy() {
         if (ctx.device == null) return
         if (panoramaPipeline != NULL) vkDestroyPipeline(ctx.device, panoramaPipeline, null)
@@ -685,7 +722,7 @@ class UiRenderer(
 
     companion object {
         /** Gaussian spread in source texels per tap step. */
-        const val BLUR_SPREAD = 4.5f
+        const val BLUR_SPREAD = 3.0f
 
         /** pos2f + uv2f + tint4ub + rect4f + gradEnd4ub + border4ub. */
         const val SURFACE_STRIDE = 44

@@ -64,10 +64,15 @@ public class VulkanSwapchain {
             int presentMode = choosePresentMode(stack, physicalDevice);
             chooseExtent(stack, caps);
 
-            int imageCount = caps.minImageCount() + 1;
+            // 4 images: enough slack that MAILBOX acquire never blocks on the
+            // presentation engine (2-3 images throttle the render loop to the
+            // display refresh — measured 30fps on a 60Hz panel)
+            int imageCount = Math.max(caps.minImageCount() + 1, 4);
             if (caps.maxImageCount() > 0 && imageCount > caps.maxImageCount()) {
                 imageCount = caps.maxImageCount();
             }
+            System.out.printf("[VulkanSwapchain] images=%d (min=%d max=%d) presentMode=%d%n",
+                    imageCount, caps.minImageCount(), caps.maxImageCount(), presentMode);
 
             boolean concurrent = ctx.graphicsFamily != ctx.presentFamily;
             VkSwapchainCreateInfoKHR info = VkSwapchainCreateInfoKHR.calloc(stack)
