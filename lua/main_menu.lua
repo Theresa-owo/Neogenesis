@@ -37,6 +37,36 @@ function M.register()
         textSize = 14, textColor = "#FF55555C",
         anchor = {0.5, 1}, pivot = {0.5, 1}, offset = {0, -12} })
 
+    -- Dynamic background toggle, bottom-right. Persisted by the engine to
+    -- config/neogenesis_ui.json (theme.colors.background is used as the solid
+    -- color when off; drop a custom image path in that file to override).
+    local dynOn = true
+    local cfgFile = "config/neogenesis_ui.json"
+    local f = io.open(cfgFile, "r")
+    if f then
+        local body = f:read("*a") or ""
+        f:close()
+        if body:find('"dynamicBackground"%s*:%s*false') then dynOn = false end
+    end
+    local bgToggle = heroui.toggle {
+        value = dynOn,
+        onChange = function(on)
+            neoui.set_dynamic_bg(on)
+            local g = io.open(cfgFile, "w")
+            if g then
+                g:write('{ "dynamicBackground": ', on and "true" or "false", " }")
+                g:close()
+            end
+        end,
+    }
+    table.insert(tree.children, heroui.label {
+        text = "Dynamic BG", textSize = 13, textColor = "#FF55555C",
+        anchor = {1, 1}, pivot = {1, 1}, offset = {-64, -46} })
+    bgToggle.anchor = {1, 1}; bgToggle.pivot = {1, 1}; bgToggle.offset = {-16, -40}
+    table.insert(tree.children, bgToggle)
+    -- apply at boot (engine default is on)
+    if not dynOn then neoui.set_dynamic_bg(false) end
+
     neoui.show_screen { id = "main_menu", tree = tree }
 
     -- Lua-driven animation: pulse the accent bar width through the

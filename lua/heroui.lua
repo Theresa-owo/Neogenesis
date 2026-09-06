@@ -996,6 +996,48 @@ function M.navbar(spec)
 end
 
 -- --------------------------------------------------------------------
+-- scrollarea: heroui.scrollarea { w, h=300, step=48, children }
+-- Engine-clipped scroll region: the box node sets clip=true and Lua drives
+-- scrollY from the wheel (neoui.mouse().wheel accumulates per frame).
+-- Children keep layout positions; the renderer shifts them by -scrollY and
+-- scissors to the viewport, and the input dispatcher hit-tests the same way.
+-- --------------------------------------------------------------------
+function M.scrollarea(spec)
+    spec.type = "box"
+    spec.clip = true
+    spec.h = spec.h or 300
+    spec.shadow = false
+    spec.textShadow = false
+    spec.scrollY = 0
+    spec.step = spec.step or 48
+    -- wrap children in a match-width column (the scrolling content)
+    if not (spec.children and #spec.children > 0 and spec.children[1].type == "column") then
+        spec.children = { M.column { spacing = spec.spacing or 8, w = "match",
+                                     children = spec.children or {} } }
+    end
+    local col = spec.children[1]
+    col.anchor = { 0, 0 }; col.pivot = { 0, 0 }
+
+    addTicker(function()
+        local root = nodeOf(spec)
+        if not root then return end
+        local m = neoui.mouse()
+        if m.wheel == 0 then return end
+        if not inside(root, m.x, m.y) then return end
+        local contentH = (col.__node and col.__node:getHeight()) or 0
+        local maxScroll = math.max(0, contentH - root:getHeight())
+        if maxScroll <= 0 then return end
+        -- scale = viewport px / viewport dp, so the step is resolution-correct
+        local scale = (spec.h and spec.h > 0) and (root:getHeight() / spec.h) or 1
+        local dir = m.wheel > 0 and -1 or 1 -- wheel up scrolls content up
+        local newY = root:getScrollY() + dir * spec.step * scale
+        root:setScrollY(clamp(newY, 0, maxScroll))
+    end)
+
+    return spec
+end
+
+-- --------------------------------------------------------------------
 -- showcase screen: neoui.open("ui_demo")
 -- --------------------------------------------------------------------
 

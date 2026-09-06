@@ -11,7 +11,7 @@ import com.google.gson.JsonObject
  * code-level defaults as fallback.
  */
 data class Theme(
-    val surface: Long = 0xC0FFFFFF,          // glass tint over blurred backdrop
+    val surface: Long = 0xF7FFFFFF,          // glass tint over blurred backdrop
     val surfaceBorder: Long = 0x14000000,    // hairline border over glass
     val surfaceSolid: Long = 0xF2211F26,     // surface-container-high fill
     val accent: Long = 0xFFD0BCFF,           // MD3 dark primary

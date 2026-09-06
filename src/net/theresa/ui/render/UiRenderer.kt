@@ -76,6 +76,69 @@ class UiRenderer(
     private val pageSets = ArrayList<Long>()
     private var uiFrameIndex = 0
 
+    /** Background mode: dynamic blurred panorama (true) or static (false). */
+    @Volatile
+    var dynamicBackground = true
+
+    /** Custom background image stretched fullscreen; null = solid color. */
+    @Volatile
+    var customBackground: UiTexture2D? = null
+
+    // fullscreen background quad (6 verts, SURFACE_STRIDE layout), rewritten
+    // every frame from CPU — trivial cost, keeps the ring for scene geometry
+    private var fsQuadBuffer = NULL
+    private var fsQuadMemory = NULL
+    private var fsQuadMapped: ByteBuffer? = null
+
+    private fun ensureFullscreenQuad() {
+        if (fsQuadBuffer != NULL) return
+        MemoryStack.stackPush().use { stack ->
+            val info = org.lwjgl.vulkan.VkBufferCreateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
+                .size((6 * SURFACE_STRIDE).toLong())
+                .usage(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+                .sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+            val pBuffer = stack.mallocLong(1)
+            VulkanContext.check(vkCreateBuffer(ctx.device, info, null, pBuffer), "vkCreateBuffer (fsQuad)")
+            fsQuadBuffer = pBuffer.get(0)
+            val reqs = org.lwjgl.vulkan.VkMemoryRequirements.calloc(stack)
+            vkGetBufferMemoryRequirements(ctx.device, fsQuadBuffer, reqs)
+            val alloc = org.lwjgl.vulkan.VkMemoryAllocateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+                .allocationSize(reqs.size())
+                .memoryTypeIndex(
+                    ctx.memoryTypeIndex(
+                        reqs.memoryTypeBits(),
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT or VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                    )
+                )
+            val pMemory = stack.mallocLong(1)
+            VulkanContext.check(vkAllocateMemory(ctx.device, alloc, null, pMemory), "vkAllocateMemory (fsQuad)")
+            fsQuadMemory = pMemory.get(0)
+            VulkanContext.check(vkBindBufferMemory(ctx.device, fsQuadBuffer, fsQuadMemory, 0), "vkBindBufferMemory (fsQuad)")
+            val pMapped = stack.mallocPointer(1)
+            VulkanContext.check(vkMapMemory(ctx.device, fsQuadMemory, 0, 6 * SURFACE_STRIDE.toLong(), 0, pMapped), "vkMapMemory (fsQuad)")
+            fsQuadMapped = pMapped.getByteBuffer(0, 6 * SURFACE_STRIDE)
+        }
+    }
+
+    private fun writeFullscreenQuad(w: Int, h: Int, argb: Int, uv01: Boolean) {
+        val q = fsQuadMapped ?: return
+        q.clear()
+        fun v(px: Float, py: Float, uu: Float, vv: Float) {
+            q.putFloat(px).putFloat(py)
+            q.putFloat(uu).putFloat(vv)
+            q.put(((argb shr 16) and 0xFF).toByte()).put(((argb shr 8) and 0xFF).toByte())
+                .put((argb and 0xFF).toByte()).put(((argb shr 24) and 0xFF).toByte())
+            q.putFloat(w.toFloat()).putFloat(h.toFloat()).putFloat(0f).putFloat(1f)
+            q.put(0).put(0).put(0).put(0)
+            q.put(0).put(0).put(0).put(0)
+        }
+        v(0f, 0f, 0f, 0f); v(0f, h.toFloat(), 0f, 1f); v(w.toFloat(), h.toFloat(), 1f, 1f)
+        v(0f, 0f, 0f, 0f); v(w.toFloat(), h.toFloat(), 1f, 1f); v(w.toFloat(), 0f, 1f, 0f)
+        q.position(0)
+    }
+
     private val startTime = GLFW.glfwGetTime()
 
     init {
@@ -140,6 +203,27 @@ class UiRenderer(
         } finally {
             for ((_, buf) in faces) MemoryUtil.memFree(buf)
         }
+    }
+
+    /** Loads a custom background image from disk (stretched fullscreen). */
+    fun loadCustomBackground(path: String) {
+        try {
+            val (w, buf) = VulkanPanorama.decodePngRgba(java.io.FileInputStream(path))
+            val h = buf.remaining() / 4 / w
+            val old = customBackground
+            customBackground = UiTexture2D(ctx, w, h, buf, VK_FORMAT_R8G8B8A8_UNORM, true)
+            MemoryUtil.memFree(buf)
+            old?.destroy()
+            System.out.println("[NeoUI] custom background loaded: $path (${w}x$h)")
+        } catch (t: Throwable) {
+            System.err.println("[NeoUI] custom background load failed: $t")
+        }
+    }
+
+    /** Removes the custom background image (falls back to solid color). */
+    fun clearCustomBackground() {
+        customBackground?.destroy()
+        customBackground = null
     }
 
     private fun createDescriptorResources(imageFormat: Int) {
@@ -464,14 +548,45 @@ class UiRenderer(
             vkCmdSetScissor(cmd, 0, scissor)
 
             if (menuContext) {
-                // Menu background: the heavily blurred backdrop fills the frame
-                // (vanilla-style), making the UI the clear focal point.
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline)
-                vkCmdBindDescriptorSets(
-                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
-                )
-                pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
-                vkCmdDraw(cmd, 3, 1, 0, 0)
+                // Menu background, three modes (switchable from Lua):
+                //  1. custom image stretched fullscreen (uiIconPipeline, uv 0..1)
+                //  2. solid theme color when dynamic backgrounds are off
+                //  3. dynamic blurred panorama (default)
+                ensureFullscreenQuad()
+                val custom = customBackground
+                when {
+                    custom != null -> {
+                        writeFullscreenQuad(width, height, -1, true)
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, uiIconPipeline)
+                        val set = iconDescriptorSet(-1, custom)
+                        vkCmdBindDescriptorSets(
+                            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(set), null
+                        )
+                        pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+                        vkCmdBindVertexBuffers(cmd, 0, stack.longs(fsQuadBuffer), stack.longs(0))
+                        vkCmdDraw(cmd, 6, 1, 0, 0)
+                    }
+                    !dynamicBackground -> {
+                        val bg = net.theresa.ui.NeoUI.theme.surfaceSolidArgb
+                        writeFullscreenQuad(width, height, bg or 0xFF000000.toInt(), false)
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, surfacePipeline)
+                        vkCmdBindDescriptorSets(
+                            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
+                        )
+                        pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+                        vkCmdBindVertexBuffers(cmd, 0, stack.longs(fsQuadBuffer), stack.longs(0))
+                        vkCmdDraw(cmd, 6, 1, 0, 0)
+                    }
+                    else -> {
+                        // Dynamic blurred panorama (default)
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, panoramaPipeline)
+                        vkCmdBindDescriptorSets(
+                            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(panoramaSet), null
+                        )
+                        pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+                        vkCmdDraw(cmd, 3, 1, 0, 0)
+                    }
+                }
 
                 val screen = net.theresa.ui.screen.ScreenManager.current
                 if (screen != null) {
@@ -555,7 +670,7 @@ class UiRenderer(
             return (ch(color, 24) shl 24) or (ch(color, 16) shl 16) or (ch(color, 8) shl 8) or ch(color, 0)
         }
 
-        fun surfaceQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode, mode: Float) {
+        fun surfaceQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode, mode: Float, shift: Float) {
             curSurface = startOrContinue(surfaceBatches, curSurface, 0)
             val lift = node.hoverT * 3f
             // press feedback: the surface shrinks 2% around its center
@@ -563,7 +678,7 @@ class UiRenderer(
             val qw = w * pressScale; val qh = h * pressScale
             val fill = stateLayer(node.fillColor, node)
             val fillEnd = stateLayer(node.fillEndColor, node)
-            val x0 = x + (w - qw) / 2; val y0 = y + (h - qh) / 2 - lift + entranceLift
+            val x0 = x + (w - qw) / 2; val y0 = y + (h - qh) / 2 - lift + shift
             val x1 = x0 + qw; val y1 = y0 + qh
             fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, fill, qw, qh, node.radius * pressScale, mode, fillEnd, node.borderColor)
             // fills: local pixel coords (uv), gradient t = uv.y / h
@@ -572,11 +687,11 @@ class UiRenderer(
             curSurface!!.quads++
         }
 
-        fun shadowQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode) {
+        fun shadowQuad(x: Float, y: Float, w: Float, h: Float, node: UiNode, shift: Float) {
             curSurface = startOrContinue(surfaceBatches, curSurface, 0)
             val s = node.shadowSpread
-            val x0 = x - s; val y0 = y - s + node.hoverT * 3f + entranceLift
-            val x1 = x + w + s; val y1 = y + h + s + node.hoverT * 3f + entranceLift
+            val x0 = x - s; val y0 = y - s + node.hoverT * 3f + shift
+            val x1 = x + w + s; val y1 = y + h + s + node.hoverT * 3f + shift
             fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, node.shadowColor, w, h, node.radius, 3f, node.shadowColor, 0)
             v(x0, y0, 0f, 0f); v(x0, y1, 0f, h); v(x1, y1, w, h)
             v(x0, y0, 0f, 0f); v(x1, y1, w, h); v(x1, y0, w, 0f)
@@ -595,7 +710,7 @@ class UiRenderer(
                     if (g.page >= 0 && g.width > 0) {
                         curText = startOrContinue(textBatches, curText, g.page)
                         val x0 = penX + g.xoff
-                        val y0 = baseline + g.yoff + entranceLift
+                        val y0 = baseline + g.yoff
                         val x1 = x0 + g.width
                         val y1 = y0 + g.height
                         fun v(px: Float, py: Float, uu: Float, vv: Float) = vert(px, py, uu, vv, argb, 0f, 0f, 0f, 0f, 0, 0)
@@ -610,11 +725,11 @@ class UiRenderer(
         }
 
         /** Icon quad: uv = sprite rect inside the item atlas, tint = node fill. */
-        fun iconQuad(node: UiNode) {
+        fun iconQuad(node: UiNode, shift: Float) {
             val spec = ItemIcons.specFor(node) ?: return
             curIcon = startOrContinue(iconBatches, curIcon, spec.atlasIndex)
             val x0 = node.x
-            val y0 = node.y + entranceLift
+            val y0 = node.y + shift
             val x1 = x0 + node.width
             val y1 = y0 + node.height
             fun v(px: Float, py: Float, uu: Float, vv: Float) =
@@ -624,20 +739,75 @@ class UiRenderer(
             curIcon!!.quads++
         }
 
-        fun renderNode(node: UiNode) {
+        /** Records all pending batches under the current scissor state and
+         *  clears the pending lists (called at clip-area boundaries). */
+        fun flushBatches() {
+            if (surfaceBatches.isEmpty() && textBatches.isEmpty() && iconBatches.isEmpty()) return
+            font.flushUploads()
+            if (surfaceBatches.isNotEmpty()) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, surfacePipeline)
+                vkCmdBindDescriptorSets(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
+                )
+                pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+                vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
+                for (b in surfaceBatches) {
+                    vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+                }
+                surfaceBatches.clear(); curSurface = null
+            }
+            if (iconBatches.isNotEmpty()) {
+                val atlasTex = try {
+                    ItemIcons.ensureAtlas(ctx)
+                } catch (t: Throwable) {
+                    System.err.println("[NeoUI] icon atlas unavailable: $t")
+                    null
+                }
+                if (atlasTex != null) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, uiIconPipeline)
+                    pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+                    vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
+                    for (b in iconBatches) {
+                        val set = iconDescriptorSet(b.page, atlasTex)
+                        if (set == NULL) continue
+                        vkCmdBindDescriptorSets(
+                            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(set), null
+                        )
+                        vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+                    }
+                    iconBatches.clear(); curIcon = null
+                }
+            }
+            if (textBatches.isNotEmpty()) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
+                pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+                vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
+                for (b in textBatches) {
+                    if (b.page >= font.pageCount()) continue
+                    vkCmdBindDescriptorSets(
+                        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0,
+                        stack.longs(pageSet(b.page)), null
+                    )
+                    vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+                }
+                textBatches.clear(); curText = null
+            }
+        }
+
+        fun renderNode(node: UiNode, shift: Float) {
             if (!node.visible) return
             if (node.drawsSurface) {
-                if (node.shadow) shadowQuad(node.x, node.y, node.width, node.height, node)
+                if (node.shadow) shadowQuad(node.x, node.y, node.width, node.height, node, shift)
                 val mode = if (node.style == UiNode.STYLE_GLASS) 2f else 1f
-                surfaceQuad(node.x, node.y, node.width, node.height, node, mode)
+                surfaceQuad(node.x, node.y, node.width, node.height, node, mode, shift)
             }
-            if (node.type == "icon") iconQuad(node)
+            if (node.type == "icon") iconQuad(node, shift)
             if (node.text.isNotEmpty()) {
                 val sizeI = (node.textSize * dp).toInt().coerceAtLeast(1)
                 val spacingPx = node.letterSpacing * dp
                 val ascent = font.ascent(sizeI.toFloat(), node.bold)
                 val desc = font.lineHeight(sizeI.toFloat(), node.bold) - ascent
-                val baseline = node.y + (node.height - (ascent + desc)) / 2 + ascent
+                val baseline = node.y + shift + (node.height - (ascent + desc)) / 2 + ascent
                 val measured = font.measure(node.text, sizeI.toFloat(), node.bold, spacingPx)
                 val startX = node.x + (node.width - measured) / 2
                 val shadowOff = 1.2f
@@ -647,61 +817,45 @@ class UiRenderer(
                 }
                 textRun(node.text, startX, baseline, sizeI, node.textColor, false, node.bold, spacingPx)
             }
-            for (c in node.children) renderNode(c)
-        }
-        renderNode(screen.root)
-
-        font.flushUploads()
-
-        // All surface quads share one pipeline + backdrop descriptor: one draw.
-        if (surfaceBatches.isNotEmpty()) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, surfacePipeline)
-            vkCmdBindDescriptorSets(
-                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
-            )
-            pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
-            vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
-            for (b in surfaceBatches) {
-                vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
-            }
-        }
-        // Item icons: one draw per atlas (descriptor bound to the copied
-        // vanilla atlas texture). Drawn after surfaces (icons sit on slot
-        // panels) and before text (stack counts sit on icons).
-        if (iconBatches.isNotEmpty()) {
-            val atlasTex = try {
-                ItemIcons.ensureAtlas(ctx)
-            } catch (t: Throwable) {
-                System.err.println("[NeoUI] icon atlas unavailable: $t")
-                null
-            }
-            if (atlasTex != null) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, uiIconPipeline)
-                pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
-                vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
-                for (b in iconBatches) {
-                    val set = iconDescriptorSet(b.page, atlasTex)
-                    if (set == NULL) continue
-                    vkCmdBindDescriptorSets(
-                        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(set), null
-                    )
-                    vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+            if (node.clip) {
+                // scroll area: flush pending batches under the current scissor,
+                // clip to this node's bounds, draw children shifted by
+                // -scrollY, flush again, restore. Children keep their layout
+                // positions; the shift moves them relative to the clip window.
+                flushBatches()
+                val cx = node.x.toInt().coerceIn(0, width)
+                val cy = (node.y + shift).toInt().coerceIn(0, height)
+                val cw = node.width.toInt().coerceIn(0, width - cx)
+                val chh = node.height.toInt().coerceIn(0, height - cy)
+                val childShift = shift - node.scrollY
+                if (cw > 0 && chh > 0) {
+                    val viewport = org.lwjgl.vulkan.VkViewport.calloc(1, stack)
+                        .x(cx.toFloat()).y(cy.toFloat()).width(cw.toFloat()).height(chh.toFloat())
+                        .minDepth(0f).maxDepth(1f)
+                    val sc = org.lwjgl.vulkan.VkRect2D.calloc(1, stack)
+                        .offset(org.lwjgl.vulkan.VkOffset2D.calloc(stack).set(cx, cy))
+                        .extent { it.set(cw, chh) }
+                    vkCmdSetScissor(cmd, 0, sc)
+                    vkCmdSetViewport(cmd, 0, viewport)
+                    for (c in node.children) renderNode(c, childShift)
+                    flushBatches()
+                    // restore full swapchain scissor/viewport
+                    val fvp = org.lwjgl.vulkan.VkViewport.calloc(1, stack)
+                        .x(0f).y(0f).width(width.toFloat()).height(height.toFloat())
+                        .minDepth(0f).maxDepth(1f)
+                    val fsc = org.lwjgl.vulkan.VkRect2D.calloc(1, stack)
+                        .offset(org.lwjgl.vulkan.VkOffset2D.calloc(stack).set(0, 0))
+                        .extent { it.set(width, height) }
+                    vkCmdSetScissor(cmd, 0, fsc)
+                    vkCmdSetViewport(cmd, 0, fvp)
                 }
+            } else {
+                for (c in node.children) renderNode(c, shift)
             }
         }
-        if (textBatches.isNotEmpty()) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
-            pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
-            vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
-            for (b in textBatches) {
-                if (b.page >= font.pageCount()) continue
-                vkCmdBindDescriptorSets(
-                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0,
-                    stack.longs(pageSet(b.page)), null
-                )
-                vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
-            }
-        }
+
+        renderNode(screen.root, entranceLift)
+        flushBatches()
     }
 
     // ------------------------------------------------------------------

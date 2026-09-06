@@ -41,6 +41,11 @@ class LuaUiRuntime {
     private val frameHooks = ArrayList<LuaValue>()
     private val registeredScreens = HashMap<String, LuaTable>()
     var keyListener: LuaValue? = null
+
+    /** Wheel delta for the current frame (set by NeoUI.tick, read by neoui.mouse). */
+    @Volatile
+    var wheelDelta: Int = 0
+
     private var startTime = System.nanoTime()
 
     fun dispatchKey(key: Int, ch: Char, down: Boolean) {
@@ -146,7 +151,9 @@ class LuaUiRuntime {
                 t.set("y", LuaValue.valueOf(my.toDouble()))
                 t.set("left", LuaValue.valueOf(libsrc.lwjglx.input.Mouse.isButtonDown(0)))
                 t.set("right", LuaValue.valueOf(libsrc.lwjglx.input.Mouse.isButtonDown(1)))
-                t.set("wheel", LuaValue.valueOf(libsrc.lwjglx.input.Mouse.getDWheel().toDouble()))
+                // accumulated wheel delta for THIS frame (120 = one notch);
+                // the raw event value is unreliable after the queue is drained
+                t.set("wheel", LuaValue.valueOf(wheelDelta.toDouble()))
                 return t
             }
         })
@@ -162,6 +169,22 @@ class LuaUiRuntime {
         api.set("set_pop_suppressed", object : VarArgFunction() {
             override fun invoke(args: Varargs): LuaValue {
                 net.theresa.ui.screen.InputDispatcher.popSuppressed = args.arg1().toboolean()
+                return LuaValue.NIL
+            }
+        })
+        // background mode: dynamic blurred panorama vs static (color/image)
+        api.set("set_dynamic_bg", object : VarArgFunction() {
+            override fun invoke(args: Varargs): LuaValue {
+                val r = NeoUI.rendererForLua() ?: return LuaValue.NIL
+                r.dynamicBackground = args.arg1().optboolean(true)
+                return LuaValue.NIL
+            }
+        })
+        api.set("set_custom_bg", object : VarArgFunction() {
+            override fun invoke(args: Varargs): LuaValue {
+                val r = NeoUI.rendererForLua() ?: return LuaValue.NIL
+                val path = args.arg1().tojstring()
+                if (path.isEmpty()) r.clearCustomBackground() else r.loadCustomBackground(path)
                 return LuaValue.NIL
             }
         })

@@ -30,6 +30,9 @@ object NeoUI {
 
     private var renderer: UiRenderer? = null
 
+    /** For the Lua bindings (neoui.set_dynamic_bg / set_custom_bg). */
+    fun rendererForLua(): UiRenderer? = renderer
+
     /** Active theme (theme.json overrides, hot-reloadable later). */
     lateinit var theme: Theme
         private set
@@ -78,6 +81,8 @@ object NeoUI {
     }
 
     private var lastTickNano = 0L
+    private var autoOpenDone = false
+    private var autoOpenAtMs = 0L
 
     /**
      * Per-frame logic on the client thread. In menu context (no world) the
@@ -100,6 +105,20 @@ object NeoUI {
                 while (Keyboard.next()) {
                 }
             }
+            // headless verification: -Dneogenesis.autoOpen=<id> opens that
+            // screen automatically a few seconds after boot (no window focus
+            // or synthetic clicks needed)
+            if (!autoOpenDone && renderer != null) {
+                val id = System.getProperty("neogenesis.autoOpen")
+                if (id != null) {
+                    if (autoOpenAtMs == 0L) autoOpenAtMs = System.currentTimeMillis() + 3000
+                    if (System.currentTimeMillis() >= autoOpenAtMs) {
+                        autoOpenDone = true
+                        System.out.println("[NeoUI] auto-opening screen: $id")
+                        handleAction("open:$id")
+                    }
+                }
+            }
         }
         screen?.tickAnimations(now, theme.entranceMs)
         // hover/press state tweens: frame-rate independent exponential smoothing
@@ -113,6 +132,7 @@ object NeoUI {
             n.pressedT += (pTarget - n.pressedT) * k
             if (kotlin.math.abs(n.pressedT - pTarget) < 0.005f) n.pressedT = pTarget
         }
+        luaRuntime?.wheelDelta = if (menuContext()) InputDispatcher.consumeWheel() else 0
         luaRuntime?.tickFrame(dtMs / 1000f)
     }
 

@@ -71,6 +71,13 @@ open class UiNode(var type: String) {
     /** True while a text field owns keyboard focus (focus ring / caret state). */
     var focused = false
 
+    // ---- scrolling (engine-clipped scroll areas) ----
+    /** When true, children render clipped to this node's bounds and shifted
+     *  up by [scrollY]; hit-testing applies the same transform. */
+    var clip = false
+    /** Content scroll offset in px (Lua-managed via getScrollY/setScrollY). */
+    var scrollY = 0f
+
     fun add(child: UiNode): UiNode {
         child.parent = this
         children.add(child)
@@ -79,21 +86,30 @@ open class UiNode(var type: String) {
 
     // ---- layout ----
 
-    /** Resolves the node's px size. MATCH fills the parent's CONTENT box
-     *  (parent bounds minus the parent's own padding). */
+    /**
+     * Resolves the node's px size. MATCH is assigned by the PARENT's arrange
+     * (row splits the remaining width across children, column gives the
+     * content box); resolveSize only fills a fallback when no assignment
+     * happened yet (width/height still 0), and must never overwrite it —
+     * a per-frame re-resolve would clobber the parent's split.
+     */
     private fun resolveSize(scale: Float, parentW: Float, parentH: Float, theme: Theme) {
         val p = parent
         val availW = if (p != null) p.width - 2 * p.padding * scale else parentW
         val availH = if (p != null) p.height - 2 * p.padding * scale else parentH
-        width = when (widthMode) {
-            SIZE_MATCH -> availW
-            SIZE_WRAP -> -1f
-            else -> dpWidth * scale
+        if (widthMode == SIZE_MATCH) {
+            if (width <= 0f) width = availW
+        } else if (widthMode == SIZE_WRAP) {
+            width = -1f
+        } else {
+            width = dpWidth * scale
         }
-        height = when (heightMode) {
-            SIZE_MATCH -> availH
-            SIZE_WRAP -> -1f
-            else -> dpHeight * scale
+        if (heightMode == SIZE_MATCH) {
+            if (height <= 0f) height = availH
+        } else if (heightMode == SIZE_WRAP) {
+            height = -1f
+        } else {
+            height = dpHeight * scale
         }
     }
 
@@ -175,8 +191,19 @@ open class UiNode(var type: String) {
                 }
             }
             "row" -> {
+                // MATCH children split the width left over by fixed/wrap
+                // siblings (sidebar 220 + divider 1 -> content takes the rest)
+                var used = 0f
+                var matchCount = 0
+                for (c in children) {
+                    if (c.widthMode == SIZE_MATCH) matchCount++ else used += c.width + spacing * scale
+                }
+                val matchW = if (matchCount > 0)
+                    (innerW - used - spacing * scale * (children.size - 1)).coerceAtLeast(0f) / matchCount
+                else 0f
                 var cx = x + pad
                 for (c in children) {
+                    if (c.widthMode == SIZE_MATCH) c.width = matchW
                     val ch = if (c.heightMode == SIZE_MATCH) innerH else c.height
                     c.height = ch
                     c.x = cx

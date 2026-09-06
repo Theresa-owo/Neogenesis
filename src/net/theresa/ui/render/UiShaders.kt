@@ -185,17 +185,17 @@ object UiShaders {
             }
 
             if (mode < 2.5) {
-                // Aero/frosted glass: the blurred backdrop shows through a navy
-                // tint overlay (bg luminance preserved), plus film grain.
+                // HeroUI light surface: a near-opaque white card that lets only
+                // a whisper of the blurred backdrop through (luminance-tinted,
+                // never showing background shapes), plus subtle film grain.
                 vec3 bg = texture(backdrop, vScreenUv).rgb;
-                float n = (hashNoise(floor(gl_FragCoord.xy)) - 0.5) * 0.022;
-                vec3 c = bg * 0.9 + vec3(0.015);
-                c = mix(c, vTint.rgb * 1.6, 0.55);
+                float n = (hashNoise(floor(gl_FragCoord.xy)) - 0.5) * 0.015;
+                vec3 c = mix(vTint.rgb, bg, 0.06);
                 c += n;
                 float aa = 1.0 - smoothstep(-0.75, 0.75, d);
                 float borderA = (1.0 - smoothstep(0.55, 1.45, abs(d + 1.0))) * vBorder.a;
                 c = mix(c, vBorder.rgb, borderA);
-                float a = clamp(vTint.a + borderA, 0.0, 1.0) * aa;
+                float a = clamp(vTint.a * 0.97 + borderA, 0.0, 1.0) * aa;
                 outColor = vec4(c, a);
                 return;
             }
