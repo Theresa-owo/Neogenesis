@@ -4,6 +4,7 @@ import net.minecraft.client.Minecraft
 import net.theresa.render.vulkan.VulkanContext
 import net.theresa.ui.NeoUI
 import net.theresa.ui.font.FontEngine
+import net.theresa.ui.hud.ItemIcons
 import net.theresa.ui.scene.UiNode
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.system.MemoryStack
@@ -64,6 +65,11 @@ class UiRenderer(
     private var blurPipeline = NULL
     private var surfacePipeline = NULL
     private var textPipeline = NULL
+    private var uiIconPipeline = NULL
+
+    /** Icon pipeline descriptor sets: atlasIndex -> set, and the view it points at. */
+    private val iconSets = HashMap<Int, Long>()
+    private val iconSetViews = HashMap<Int, Long>()
 
     val font: FontEngine = FontEngine.create(ctx)
     private val ring = UiBufferRing(ctx)
@@ -354,6 +360,8 @@ class UiRenderer(
             textPipeline = buildPipeline(stack, textSpvVert, textSpvFrag, SURFACE_STRIDE, surfaceAttributes(stack))
             val surfaceSpvFrag = UiShaders.compile(UiShaders.load("surface", UiShaders.Stage.FRAGMENT, UiShaders.SURFACE_FRAG), UiShaders.Stage.FRAGMENT, "ui_surface.frag")
             surfacePipeline = buildPipeline(stack, textSpvVert, surfaceSpvFrag, SURFACE_STRIDE, surfaceAttributes(stack))
+            val iconSpvFrag = UiShaders.compile(UiShaders.load("icon", UiShaders.Stage.FRAGMENT, ICON_FRAG), UiShaders.Stage.FRAGMENT, "ui_icon.frag")
+            uiIconPipeline = buildPipeline(stack, textSpvVert, iconSpvFrag, SURFACE_STRIDE, surfaceAttributes(stack))
         }
     }
 
@@ -364,6 +372,7 @@ class UiRenderer(
         if (blurPipeline != NULL) { vkDestroyPipeline(ctx.device, blurPipeline, null); blurPipeline = NULL }
         if (textPipeline != NULL) { vkDestroyPipeline(ctx.device, textPipeline, null); textPipeline = NULL }
         if (surfacePipeline != NULL) { vkDestroyPipeline(ctx.device, surfacePipeline, null); surfacePipeline = NULL }
+        if (uiIconPipeline != NULL) { vkDestroyPipeline(ctx.device, uiIconPipeline, null); uiIconPipeline = NULL }
         createPipelines()
         System.out.println("[NeoUI] pipelines reloaded")
     }
@@ -503,8 +512,10 @@ class UiRenderer(
 
         val surfaceBatches = ArrayList<Batch>()
         val textBatches = ArrayList<Batch>()
+        val iconBatches = ArrayList<Batch>()
         var curSurface: Batch? = null
         var curText: Batch? = null
+        var curIcon: Batch? = null
 
         // screen entrance: whole tree slides up + fades in (smoothstepped)
         val entrance = screen.entranceT
@@ -598,6 +609,21 @@ class UiRenderer(
             }
         }
 
+        /** Icon quad: uv = sprite rect inside the item atlas, tint = node fill. */
+        fun iconQuad(node: UiNode) {
+            val spec = ItemIcons.specFor(node) ?: return
+            curIcon = startOrContinue(iconBatches, curIcon, spec.atlasIndex)
+            val x0 = node.x
+            val y0 = node.y + entranceLift
+            val x1 = x0 + node.width
+            val y1 = y0 + node.height
+            fun v(px: Float, py: Float, uu: Float, vv: Float) =
+                vert(px, py, uu, vv, node.fillColor, 0f, 0f, 0f, 0f, 0, 0)
+            v(x0, y0, spec.u0, spec.v0); v(x0, y1, spec.u0, spec.v1); v(x1, y1, spec.u1, spec.v1)
+            v(x0, y0, spec.u0, spec.v0); v(x1, y1, spec.u1, spec.v1); v(x1, y0, spec.u1, spec.v0)
+            curIcon!!.quads++
+        }
+
         fun renderNode(node: UiNode) {
             if (!node.visible) return
             if (node.drawsSurface) {
@@ -605,6 +631,7 @@ class UiRenderer(
                 val mode = if (node.style == UiNode.STYLE_GLASS) 2f else 1f
                 surfaceQuad(node.x, node.y, node.width, node.height, node, mode)
             }
+            if (node.type == "icon") iconQuad(node)
             if (node.text.isNotEmpty()) {
                 val sizeI = (node.textSize * dp).toInt().coerceAtLeast(1)
                 val spacingPx = node.letterSpacing * dp
@@ -636,6 +663,30 @@ class UiRenderer(
             vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
             for (b in surfaceBatches) {
                 vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+            }
+        }
+        // Item icons: one draw per atlas (descriptor bound to the copied
+        // vanilla atlas texture). Drawn after surfaces (icons sit on slot
+        // panels) and before text (stack counts sit on icons).
+        if (iconBatches.isNotEmpty()) {
+            val atlasTex = try {
+                ItemIcons.ensureAtlas(ctx)
+            } catch (t: Throwable) {
+                System.err.println("[NeoUI] icon atlas unavailable: $t")
+                null
+            }
+            if (atlasTex != null) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, uiIconPipeline)
+                pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+                vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
+                for (b in iconBatches) {
+                    val set = iconDescriptorSet(b.page, atlasTex)
+                    if (set == NULL) continue
+                    vkCmdBindDescriptorSets(
+                        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(set), null
+                    )
+                    vkCmdDraw(cmd, b.quads * 6, 1, b.firstVertex, 0)
+                }
             }
         }
         if (textBatches.isNotEmpty()) {
@@ -688,6 +739,43 @@ class UiRenderer(
         }
     }
 
+    /**
+     * Descriptor set for an item atlas texture (combined image sampler,
+     * CLAMP_TO_EDGE — UiTexture2D's sampler clamps, keeping half-texel sprite
+     * edges from bleeding into neighbours). Re-allocated (and re-pointed) when
+     * the atlas was re-copied, e.g. after a resource-pack reload.
+     */
+    private fun iconDescriptorSet(atlasIndex: Int, tex: net.theresa.ui.render.UiTexture2D): Long {
+        val existing = iconSets[atlasIndex]
+        if (existing != null && existing != NULL && iconSetViews[atlasIndex] == tex.view) return existing
+        MemoryStack.stackPush().use { stack ->
+            val allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO)
+                .descriptorPool(descriptorPool)
+                .pSetLayouts(stack.longs(descriptorSetLayout))
+            val set = stack.mallocLong(1)
+            VulkanContext.check(
+                vkAllocateDescriptorSets(ctx.device, allocInfo, set), "vkAllocateDescriptorSets (icon atlas)"
+            )
+            val info = VkDescriptorImageInfo.calloc(1, stack)
+            info.get(0).sampler(tex.sampler)
+                .imageView(tex.view)
+                .imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            val write = VkWriteDescriptorSet.calloc(1, stack)
+            write.get(0)
+                .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+                .dstSet(set.get(0))
+                .dstBinding(0)
+                .descriptorCount(1)
+                .descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                .pImageInfo(info)
+            vkUpdateDescriptorSets(ctx.device, write, null)
+            iconSets[atlasIndex] = set.get(0)
+            iconSetViews[atlasIndex] = tex.view
+            return set.get(0)
+        }
+    }
+
 
     /** Swapchain resized: rebuild quarter-res targets and re-point descriptors. */
     fun onResized(width: Int, height: Int) {
@@ -729,6 +817,7 @@ class UiRenderer(
         font.destroy()
         chain.destroy()
         panorama.destroy()
+        ItemIcons.destroy()
     }
 
     companion object {
@@ -737,6 +826,24 @@ class UiRenderer(
 
         /** pos2f + uv2f + tint4ub + rect4f + gradEnd4ub + border4ub. */
         const val SURFACE_STRIDE = 44
+
+        /**
+         * Icon pipeline fragment source (embedded fallback for
+         * shaders_vk/ui_icon.frag): samples the copied vanilla item atlas;
+         * vertex tint rgb multiplies the texture color, tint alpha scales it.
+         */
+        val ICON_FRAG = """
+            #version 450
+            layout(push_constant) uniform Push { mat4 ortho; vec4 params0; vec4 params1; } push;
+            layout(binding = 0) uniform sampler2D atlas;
+            layout(location = 0) in vec2 vUv;
+            layout(location = 1) in vec4 vTint;
+            layout(location = 0) out vec4 outColor;
+            void main() {
+                vec4 tex = texture(atlas, vUv);
+                outColor = vec4(tex.rgb * vTint.rgb, tex.a * vTint.a);
+            }
+        """.trimIndent() + "\n"
 
         /** Vertex attribute descriptions shared by surface/text pipelines. */
         private fun surfaceAttributes(stack: MemoryStack): VkVertexInputAttributeDescription.Buffer {

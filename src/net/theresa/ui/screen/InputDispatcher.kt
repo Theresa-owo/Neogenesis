@@ -57,12 +57,16 @@ object InputDispatcher {
             val key = Keyboard.getEventKey()
             val ch = Keyboard.getEventCharacter()
             val down = Keyboard.getEventKeyState()
-            // Lua text fields observe every key event (may consume)
+            // Lua text fields observe every key event (may consume). Snapshot
+            // the suppression flag BEFORE dispatching: a focused field that
+            // blurs itself on ESC (clearing the flag inside the listener)
+            // must not make that same ESC pop the screen.
+            val escSuppressed = popSuppressed
             try {
                 net.theresa.ui.NeoUI.dispatchLuaKey(key, ch, down)
             } catch (_: Throwable) {
             }
-            if (down && key == 1 && !popSuppressed) { // ESC
+            if (down && key == 1 && !escSuppressed) { // ESC
                 ScreenManager.pop()
             }
         }
@@ -95,5 +99,10 @@ object InputDispatcher {
         hoveredNode = null
         pressedNode?.pressed = false
         pressedNode = null
+        // A stack change invalidates Lua-side focus state: text fields blur
+        // via click-away/ESC before any stack change they cause, and a Lua
+        // reload (F10) with a field focused would otherwise leave ESC
+        // popping permanently suppressed.
+        popSuppressed = false
     }
 }

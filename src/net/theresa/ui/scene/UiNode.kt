@@ -67,6 +67,10 @@ open class UiNode(var type: String) {
     var bold = false
     var letterSpacing = 0f              // extra px advance per glyph
 
+    // ---- text editing (Lua text fields; purely additive state) ----
+    /** True while a text field owns keyboard focus (focus ring / caret state). */
+    var focused = false
+
     fun add(child: UiNode): UiNode {
         child.parent = this
         children.add(child)

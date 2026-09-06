@@ -324,9 +324,13 @@ class LuaUiRuntime {
 
     companion object {
         private val EMBED_INIT = """
-            package.path = package.path .. ";./lua/?.lua;"
+            package.path = package.path .. ";./lua/?.lua;./lua/screens/?.lua;"
             local main_menu = require("main_menu")
             main_menu.register()
+            -- screens self-register on require (open:<id> routes to them)
+            require("screens.settings")
+            require("screens.singleplayer")
+            require("screens.multiplayer")
         """.trimIndent() + "\n"
 
         private val EMBED_HEROUI = """
