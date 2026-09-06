@@ -13,14 +13,14 @@ data class Theme(
     val surfaceSolid: Long = 0xF21A1E26,     // solid panel fill
     val accent: Long = 0xFF7C5CFF,           // primary button fill
     val accentEnd: Long = 0xFF6A49E8,        // primary button gradient end
-    val ghost: Long = 0x59FFFFFF,            // secondary button fill
-    val ghostBorder: Long = 0x40FFFFFF,
+    val ghost: Long = 0x4DFFFFFF,            // secondary button fill
+    val ghostBorder: Long = 0x4DFFFFFF,
     val text: Long = 0xFFF2F3F5,
     val textMuted: Long = 0xFF9AA0A8,
     val shadow: Long = 0x66000000,
-    val radius: Float = 14f,
+    val radius: Float = 16f,
     val baseScale: Float = 1f,
-    val fontSize: Float = 17f,
+    val fontSize: Float = 20f,
     val entranceMs: Long = 280,
     val hoverMs: Long = 120,
 ) {

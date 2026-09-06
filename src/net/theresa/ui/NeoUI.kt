@@ -40,6 +40,7 @@ object NeoUI {
 
     fun init(ctx: VulkanContext, window: Long, imageFormat: Int, width: Int, height: Int) {
         destroy()
+        val t0 = System.nanoTime()
         theme = Theme.load()
         try {
             renderer = UiRenderer(ctx, window, imageFormat, width, height)
@@ -54,6 +55,7 @@ object NeoUI {
         if (menuContext()) {
             ScreenManager.show(NeoScreens.create("main_menu"))
         }
+        System.out.printf("[NeoUI] init complete in %.0fms%n", (System.nanoTime() - t0) / 1e6)
     }
 
     private fun registerBuiltins() {

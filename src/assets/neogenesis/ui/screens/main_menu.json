@@ -2,21 +2,22 @@
   "type": "box",
   "children": [
     {
-      "type": "panel", "w": 460, "anchor": [0.5, 0.5], "pivot": [0.5, 0.5], "padding": 24,
+      "type": "panel", "w": 470, "anchor": [0.5, 0.5], "pivot": [0.5, 0.5], "padding": 28,
       "children": [
         {
-          "type": "column", "spacing": 10, "w": "match",
+          "type": "column", "spacing": 12, "w": "match",
           "children": [
-            { "type": "label", "text": "§bNEOGENESIS", "textSize": 38, "w": "match" },
-            { "type": "label", "text": "§8Vulkan Native UI", "textSize": 15, "textColor": "#FF9AA0A8", "w": "match" },
-            { "type": "spacer", "h": 12 },
+            { "type": "label", "text": "§bNEOGENESIS", "textSize": 46, "w": "match" },
+            { "type": "label", "text": "§8Vulkan Native UI", "textSize": 16, "textColor": "#FF9AA0A8", "w": "match" },
+            { "type": "panel", "style": "primary", "w": 64, "h": 4, "radius": 2, "shadow": false },
+            { "type": "spacer", "h": 14 },
             { "type": "button", "text": {"i18n": "menu.singleplayer"}, "style": "primary", "onClick": "open:singleplayer" },
             { "type": "button", "text": {"i18n": "menu.multiplayer"}, "style": "ghost", "onClick": "open:multiplayer" },
             {
-              "type": "row", "spacing": 8, "w": "match",
+              "type": "row", "spacing": 8, "w": 380,
               "children": [
-                { "type": "button", "text": {"i18n": "menu.options"}, "style": "ghost", "w": 196, "onClick": "open:options" },
-                { "type": "button", "text": {"i18n": "options.language"}, "style": "ghost", "w": 196, "onClick": "open:language" }
+                { "type": "button", "text": {"i18n": "menu.options"}, "style": "ghost", "w": 186, "onClick": "open:options" },
+                { "type": "button", "text": {"i18n": "options.language"}, "style": "ghost", "w": 186, "onClick": "open:language" }
               ]
             },
             { "type": "button", "text": {"i18n": "menu.quit"}, "style": "ghost", "onClick": "quit" }

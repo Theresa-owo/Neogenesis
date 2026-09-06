@@ -4,14 +4,14 @@
   "surfaceSolid": "0xF21A1E26",
   "accent": "0xFF7C5CFF",
   "accentEnd": "0xFF6A49E8",
-  "ghost": "0x59FFFFFF",
-  "ghostBorder": "0x40FFFFFF",
+  "ghost": "0x4DFFFFFF",
+  "ghostBorder": "0x4DFFFFFF",
   "text": "0xFFF2F3F5",
   "textMuted": "0xFF9AA0A8",
   "shadow": "0x66000000",
-  "radius": 14.0,
+  "radius": 16.0,
   "baseScale": 1.0,
-  "fontSize": 17.0,
+  "fontSize": 20.0,
   "entranceMs": 280,
   "hoverMs": 120
 }

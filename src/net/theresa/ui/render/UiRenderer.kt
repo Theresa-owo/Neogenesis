@@ -94,8 +94,8 @@ class UiRenderer(
      *     with bilinear filtering.
      */
     private fun loadPanorama(): VulkanPanorama {
-        val outW = 4096
-        val outH = 2048
+        val outW = 2048
+        val outH = 1024
         val faces = ArrayList<Pair<Int, ByteBuffer>>(6)
         try {
             val rm = Minecraft.getMinecraft().getResourceManager()
@@ -452,10 +452,11 @@ class UiRenderer(
             vkCmdSetScissor(cmd, 0, scissor)
 
             if (menuContext) {
-                // Menu background: the panorama sampled full screen.
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, panoramaPipeline)
+                // Menu background: the heavily blurred backdrop fills the frame
+                // (vanilla-style), making the UI the clear focal point.
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline)
                 vkCmdBindDescriptorSets(
-                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(panoramaSet), null
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, stack.longs(rt0Set), null
                 )
                 pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
                 vkCmdDraw(cmd, 3, 1, 0, 0)
