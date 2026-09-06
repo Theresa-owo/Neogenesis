@@ -1,6 +1,7 @@
 package net.theresa.ui.render
 
 import net.theresa.render.vulkan.VulkanContext
+import net.theresa.ui.font.FontEngine
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
@@ -58,6 +59,12 @@ class UiRenderer(
     private var pipelineLayout = NULL
     private var panoramaPipeline = NULL
     private var blurPipeline = NULL
+    private var textPipeline = NULL
+
+    private val font: FontEngine = FontEngine.create(ctx)
+    private val ring = UiBufferRing(ctx)
+    private val pageSets = ArrayList<Long>()
+    private var uiFrameIndex = 0
 
     private val startTime = GLFW.glfwGetTime()
 
@@ -116,11 +123,11 @@ class UiRenderer(
 
             val poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO)
-                .maxSets(6)
+                .maxSets(32)
             poolInfo.pPoolSizes(
                 VkDescriptorPoolSize.calloc(1, stack)
                     .type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                    .descriptorCount(6)
+                    .descriptorCount(32)
             )
             val pPool = stack.mallocLong(1)
             VulkanContext.check(
@@ -309,6 +316,10 @@ class UiRenderer(
 
             panoramaPipeline = buildPipeline(stack, vertSpv, panoramaSpv, 0, null)
             blurPipeline = buildPipeline(stack, vertSpv, blurSpv, 0, null)
+
+            val textSpvVert = UiShaders.compile(UiShaders.load("surface", UiShaders.Stage.VERTEX, UiShaders.SURFACE_VERT), UiShaders.Stage.VERTEX, "ui_surface.vert")
+            val textSpvFrag = UiShaders.compile(UiShaders.load("text", UiShaders.Stage.FRAGMENT, UiShaders.TEXT_FRAG), UiShaders.Stage.FRAGMENT, "ui_text.frag")
+            textPipeline = buildPipeline(stack, textSpvVert, textSpvFrag, SURFACE_STRIDE, surfaceAttributes(stack))
         }
     }
 
@@ -317,6 +328,7 @@ class UiRenderer(
         ctx.waitIdle()
         if (panoramaPipeline != NULL) { vkDestroyPipeline(ctx.device, panoramaPipeline, null); panoramaPipeline = NULL }
         if (blurPipeline != NULL) { vkDestroyPipeline(ctx.device, blurPipeline, null); blurPipeline = NULL }
+        if (textPipeline != NULL) { vkDestroyPipeline(ctx.device, textPipeline, null); textPipeline = NULL }
         createPipelines()
         System.out.println("[NeoUI] pipelines reloaded")
     }
@@ -329,7 +341,9 @@ class UiRenderer(
                               params1x: Float, params1y: Float, params1z: Float, params1w: Float) {
         val push = stack.malloc(UiShaders.PUSH_SIZE)
         push.clear()
-        Matrix4f().ortho(0f, width.toFloat(), height.toFloat(), 0f, -1f, 1f).get(push)
+        // pixel coords with Y down: y=0 -> NDC -1 (top of the framebuffer in
+        // Vulkan), y=h -> NDC +1 (bottom)
+        Matrix4f().ortho(0f, width.toFloat(), 0f, height.toFloat(), -1f, 1f).get(push)
         push.position(64)
         push.putFloat(width.toFloat()).putFloat(height.toFloat())
         push.putFloat((GLFW.glfwGetTime() - startTime).toFloat())
@@ -345,6 +359,8 @@ class UiRenderer(
 
     /** Records the offscreen panorama + blur passes; call before the main render pass. */
     fun prepare(cmd: VkCommandBuffer) {
+        ring.beginFrame()
+        uiFrameIndex++
         val rt0 = chain.rt0 ?: return
         val rt1 = chain.rt1 ?: return
 
@@ -408,8 +424,146 @@ class UiRenderer(
                 )
                 pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
                 vkCmdDraw(cmd, 3, 1, 0, 0)
+
+                // M2 verification text: TTF glyphs over the panorama.
+                val dp = height / 1080f
+                drawText(cmd, stack, width, height,
+                    "§fNeoUI §7M2 §f— §bTTF Font Test 单人游戏 Multiplayer",
+                    64f, 64f, 30f * dp, 0xFFFFFFFF.toInt(), true)
             }
             // Scene widget draws are appended here (M3/M4).
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Text
+    // ------------------------------------------------------------------
+
+    /** Lazily allocates the descriptor set for a glyph atlas page. */
+    private fun pageSet(page: Int): Long {
+        while (pageSets.size <= page) pageSets.add(NULL)
+        if (pageSets[page] != NULL) return pageSets[page]
+        MemoryStack.stackPush().use { stack ->
+            val allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO)
+                .descriptorPool(descriptorPool)
+                .pSetLayouts(stack.longs(descriptorSetLayout))
+            val set = stack.mallocLong(1)
+            VulkanContext.check(
+                vkAllocateDescriptorSets(ctx.device, allocInfo, set), "vkAllocateDescriptorSets (atlas page)"
+            )
+            val info = VkDescriptorImageInfo.calloc(1, stack)
+            info.get(0).sampler(font.pageTexture(page).sampler)
+                .imageView(font.pageTexture(page).view)
+                .imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            val write = VkWriteDescriptorSet.calloc(1, stack)
+            write.get(0)
+                .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+                .dstSet(set.get(0))
+                .dstBinding(0)
+                .descriptorCount(1)
+                .descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                .pImageInfo(info)
+            vkUpdateDescriptorSets(ctx.device, write, null)
+            pageSets[page] = set.get(0)
+            return set.get(0)
+        }
+    }
+
+    /**
+     * Encodes glyph quads into the frame's ring slot (shadow pass first, then
+     * the color pass) and records one draw per atlas page run.
+     */
+    private fun drawText(
+        cmd: VkCommandBuffer,
+        stack: MemoryStack,
+        width: Int,
+        height: Int,
+        text: String,
+        x: Float,
+        y: Float,
+        sizePx: Float,
+        color: Int,
+        shadow: Boolean,
+    ) {
+        val view = ring.slot()
+        val sizeI = sizePx.toInt().coerceAtLeast(1)
+        val ascent = font.ascent(sizeI.toFloat())
+        val shadowOffset = (sizeI / 14f).coerceAtLeast(1f)
+
+        class Batch(var page: Int, var firstVertex: Int, var quads: Int)
+
+        val batches = ArrayList<Batch>()
+        var cur: Batch? = null
+
+        fun emitQuad(bx: Float, by: Float, g: FontEngine.Glyph, argb: Int, isShadow: Boolean) {
+            if (g.page < 0 || g.width == 0) return
+            val pageIndex = g.page + if (isShadow) 1000 else 0
+            val startVertex = ring.usedBytes(view) / SURFACE_STRIDE
+            if (cur == null || cur!!.page != pageIndex || cur!!.firstVertex + cur!!.quads != startVertex) {
+                cur = Batch(pageIndex, startVertex, 0)
+                batches.add(cur!!)
+            }
+            val r = ((argb shr 16) and 0xFF).toByte()
+            val gcol = ((argb shr 8) and 0xFF).toByte()
+            val b = (argb and 0xFF).toByte()
+            val a = ((argb shr 24) and 0xFF).toByte()
+            val x0 = bx + g.xoff
+            val y0 = by + g.yoff
+            val x1 = x0 + g.width
+            val y1 = y0 + g.height
+            val u0 = g.u0; val v0 = g.v0; val u1 = g.u1; val v1 = g.v1
+            // two triangles, clockwise in y-down screen space
+            fun vert(px: Float, py: Float, uu: Float, vv: Float) {
+                view.putFloat(px).putFloat(py)
+                view.putFloat(uu).putFloat(vv)
+                view.put(r).put(gcol).put(b).put(a)
+                view.putFloat(0f).putFloat(0f).putFloat(0f).putFloat(0f)
+                view.put(0).put(0).put(0).put(0)
+                view.put(0).put(0).put(0).put(0)
+            }
+            vert(x0, y0, u0, v0); vert(x0, y1, u0, v1); vert(x1, y1, u1, v1)
+            vert(x0, y0, u0, v0); vert(x1, y1, u1, v1); vert(x1, y0, u1, v0)
+            cur!!.quads++
+        }
+
+        fun encodePass(color: Int, isShadow: Boolean, ox: Float, oy: Float) {
+            var penX = x + ox
+            val penY = y + ascent + oy
+            var prev = -1
+            for ((seg, argb) in FontEngine.parseColorCodes(text, color)) {
+                for (ch in seg) {
+                    val cp = ch.code
+                    if (cp == '\n'.code) continue
+                    val g = font.getGlyph(cp, sizeI.toFloat())
+                    if (prev >= 0) penX += font.kern(prev, cp, sizeI.toFloat())
+                    emitQuad(penX, penY, g, argb, isShadow)
+                    penX += g.advance
+                    prev = cp
+                }
+            }
+        }
+
+        if (shadow) {
+            val shadowArgb = (0x96 shl 24) or (((color and 0x00FFFFFF) shr 2) and 0x00FFFFFF)
+            encodePass(shadowArgb, true, shadowOffset, shadowOffset)
+        }
+        encodePass(color, false, 0f, 0f)
+
+        font.flushUploads()
+
+        if (batches.isEmpty()) return
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
+        pushConstants(cmd, stack, width, height, 0f, 0f, 0f, 0f)
+        vkCmdBindVertexBuffers(cmd, 0, stack.longs(ring.buffer), stack.longs(ring.slotOffset()))
+        for (batch in batches) {
+            val pageIndex = batch.page % 1000
+            if (pageIndex >= font.pageCount()) continue
+            vkCmdBindDescriptorSets(
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0,
+                stack.longs(pageSet(pageIndex)), null
+            )
+            vkCmdDraw(cmd, batch.quads * 6, 1, batch.firstVertex, 0)
         }
     }
 
@@ -426,9 +580,12 @@ class UiRenderer(
         if (ctx.device == null) return
         if (panoramaPipeline != NULL) vkDestroyPipeline(ctx.device, panoramaPipeline, null)
         if (blurPipeline != NULL) vkDestroyPipeline(ctx.device, blurPipeline, null)
+        if (textPipeline != NULL) vkDestroyPipeline(ctx.device, textPipeline, null)
         if (pipelineLayout != NULL) vkDestroyPipelineLayout(ctx.device, pipelineLayout, null)
         if (descriptorPool != NULL) vkDestroyDescriptorPool(ctx.device, descriptorPool, null)
         if (descriptorSetLayout != NULL) vkDestroyDescriptorSetLayout(ctx.device, descriptorSetLayout, null)
+        ring.destroy()
+        font.destroy()
         chain.destroy()
         panorama.destroy()
     }
@@ -436,5 +593,20 @@ class UiRenderer(
     companion object {
         /** Gaussian spread in source texels per tap step. */
         const val BLUR_SPREAD = 3.0f
+
+        /** pos2f + uv2f + tint4ub + rect4f + gradEnd4ub + border4ub. */
+        const val SURFACE_STRIDE = 44
+
+        /** Vertex attribute descriptions shared by surface/text pipelines. */
+        private fun surfaceAttributes(stack: MemoryStack): VkVertexInputAttributeDescription.Buffer {
+            val attrs = VkVertexInputAttributeDescription.calloc(6, stack)
+            attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32_SFLOAT).offset(0)
+            attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32G32_SFLOAT).offset(8)
+            attrs.get(2).binding(0).location(2).format(VK_FORMAT_R8G8B8A8_UNORM).offset(16)
+            attrs.get(3).binding(0).location(3).format(VK_FORMAT_R32G32B32A32_SFLOAT).offset(20)
+            attrs.get(4).binding(0).location(4).format(VK_FORMAT_R8G8B8A8_UNORM).offset(36)
+            attrs.get(5).binding(0).location(5).format(VK_FORMAT_R8G8B8A8_UNORM).offset(40)
+            return attrs
+        }
     }
 }
