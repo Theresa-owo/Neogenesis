@@ -136,7 +136,9 @@ open class UiNode(var type: String) {
             return
         }
         // containers: run a speculative pass on children with parent size 0,
-        // then take the max/sum
+        // then take the max/sum. MATCH children keep their last-frame size as
+        // the measurement basis (a 0-width probe collapses nested MATCH chains
+        // and makes WRAP cards measure to padding-only heights).
         val probeW = if (width < 0) 0f else width
         val probeH = if (height < 0) 0f else height
         var maxW = 0f
@@ -145,7 +147,8 @@ open class UiNode(var type: String) {
         var maxH = 0f
         for (c in children) {
             c.x = 0f; c.y = 0f
-            c.width = 0f; c.height = 0f
+            if (!(c.widthMode == SIZE_MATCH && c.width > 0f)) c.width = 0f
+            if (!(c.heightMode == SIZE_MATCH && c.height > 0f)) c.height = 0f
             c.probeLayout(scale, probeW.coerceAtLeast(1f), probeH.coerceAtLeast(1f), theme)
             maxW = maxOf(maxW, c.width)
             maxH = maxOf(maxH, c.height)

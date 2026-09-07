@@ -114,7 +114,12 @@ class LuaUiRuntime {
             override fun invoke(args: Varargs): LuaValue {
                 val spec = args.arg1().checktable()
                 val id = spec.get("id").tojstring()
-                val root = nodeFromLua(spec.get("tree").checktable())
+                val treeSpec = spec.get("tree")
+                val root = if (treeSpec.isfunction()) {
+                    nodeFromLua(treeSpec.call().checktable())
+                } else {
+                    nodeFromLua(treeSpec.checktable())
+                }
                 ScreenManager.show(NeoScreen(id, root))
                 return LuaValue.NIL
             }
@@ -123,7 +128,12 @@ class LuaUiRuntime {
             override fun invoke(args: Varargs): LuaValue {
                 val spec = args.arg1().checktable()
                 val id = spec.get("id").tojstring()
-                val root = nodeFromLua(spec.get("tree").checktable())
+                val treeSpec = spec.get("tree")
+                val root = if (treeSpec.isfunction()) {
+                    nodeFromLua(treeSpec.call().checktable())
+                } else {
+                    nodeFromLua(treeSpec.checktable())
+                }
                 ScreenManager.push(NeoScreen(id, root))
                 return LuaValue.NIL
             }
@@ -201,13 +211,30 @@ class LuaUiRuntime {
                 return LuaValue.NIL
             }
         })
+        // "#AARRGGBB" / "#RRGGBB" -> signed ARGB int (Lua-side color helper)
+        api.set("argb_of", object : VarArgFunction() {
+            override fun invoke(args: Varargs): LuaValue {
+                val s = args.arg1().tojstring().removePrefix("#")
+                val argb = when (s.length) {
+                    6 -> 0xFF000000L or s.toLong(16)
+                    8 -> s.toLong(16)
+                    else -> 0xFFFFFFFFL
+                }
+                return LuaValue.valueOf(argb.toInt())
+            }
+        })
         return api
     }
 
     /** open:<id> actions resolve Lua-registered screens first; true when handled. */
     fun openScreen(id: String): Boolean {
         val spec = registeredScreens[id] ?: return false
-        val root = nodeFromLua(spec.get("tree").checktable())
+        val treeSpec = spec.get("tree")
+        val root = if (treeSpec.isfunction()) {
+            nodeFromLua(treeSpec.call().checktable())
+        } else {
+            nodeFromLua(treeSpec.checktable())
+        }
         ScreenManager.push(NeoScreen(id, root))
         return true
     }
